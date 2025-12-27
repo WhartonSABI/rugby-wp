@@ -414,32 +414,34 @@ mean(xgb_class == y_test)
 # Calibration
 
 # Random Forest
-test_data$Win_Prob_RF <- predict(
+train_data$Win_Prob_RF <- predict(
   rf_fit,
-  newdata = test_data,
+  newdata = train_data,
   type = "prob"
 )[, "1"]
 
 # Logistic
-test_data$Win_Prob_Logit <- predict(
+logit_train$Win_Prob_Logit <- predict(
   logit_fit,
-  newdata = test_data,
+  newdata = logit_train,
   type = "response"
 )
 
 # XGBoost
-test_data$Win_Prob_XGB <- predict(
+train_data$Win_Prob_XGB <- predict(
   xgb_fit,
-  newdata = dtest
+  newdata = dtrain
 )
 
-calibration_df <- function(prob, y, n_bins = 10) {
-  tibble(
-    prob = prob,
-    y = y
-  ) %>%
+calibration_df_fixed <- function(prob, y, n_bins = 10) {
+  tibble(prob = prob, y = y) %>%
     mutate(
-      bin = ntile(prob, n_bins)
+      bin = cut(
+        prob,
+        breaks = seq(0, 1, length.out = n_bins + 1),
+        include.lowest = TRUE,
+        labels = FALSE
+      )
     ) %>%
     group_by(bin) %>%
     summarise(
@@ -453,18 +455,18 @@ calibration_df <- function(prob, y, n_bins = 10) {
 # Calibration tables
 
 cal_logit <- calibration_df(
-  test_data$Win_Prob_Logit,
-  test_data$Win
+  logit_train$Win_Prob_Logit,
+  logit_train$Win
 )
 
 cal_rf <- calibration_df(
-  test_data$Win_Prob_RF,
-  test_data$Win
+  train_data$Win_Prob_RF,
+  train_data$Win
 )
 
 cal_xgb <- calibration_df(
-  test_data$Win_Prob_XGB,
-  test_data$Win
+  train_data$Win_Prob_XGB,
+  train_data$Win
 )
 
 cal_all <- bind_rows(
