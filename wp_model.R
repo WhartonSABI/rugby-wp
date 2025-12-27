@@ -2,11 +2,19 @@ library(tidyverse)
 library(stringr)
 library(patchwork)
 library(ggplot2)
+library(xgboost)
+library(Matrix)
+library(randomForest)
+library(tidyr)
 
+setwd("/Users/kennywatts/Documents/Github/Rugby_wp")
 
 phase_data = read.csv("/Users/kennywatts/Documents/Github/Rugby-Expected-Points/data/phase_2018-19.csv")
 
-# preview data
+################################
+### Organising training data ###
+################################
+
 head(phase_data)
 
 phase_data <- phase_data %>%
@@ -125,6 +133,27 @@ phase_data <- phase_data %>%
     0
     ))
 
+# Adding meter line of play start
+location_names <- c("5m-Goal (opp)", "22m-5m (opp)", "10m-22m (opp)",
+                    "Half-10m (opp)","10m-Half (own)", "22m-10m (own)",
+                    "5m-22m (own)", "Goal-5m (own)")
+location_meters <- c(2.5, 13.5, 31, 45, 55, 69, 86.5, 97.5)
+
+lookup <- setNames(location_meters, location_names)
+
+phase_data$meter_line <- lookup[phase_data$Location]
+
+# Adding scores ahead variable
+
+phase_data <- phase_data %>%
+  mutate(
+    Scores_Ahead = case_when(
+      Points_Difference == 0 ~ 0L,
+      TRUE ~ sign(Points_Difference) *
+        ceiling(abs(Points_Difference) / 7)
+    )
+  )
+
 # Adding whether you have possession or not
 
 phase_team <- phase_data %>%
@@ -145,9 +174,15 @@ phase_team <- phase_data %>%
     home_row$WinPct_Diff_Team <- if_else(home_row$Possession == 1,
                                          home_row$WinPct_Diff,
                                          -home_row$WinPct_Diff)
+    home_row$Scores_Ahead_Team <- if_else(home_row$Possession == 1,
+                                        home_row$Scores_Ahead,
+                                        -home_row$Scores_Ahead)
     home_row$Card_Diff_Team <- if_else(home_row$Possession == 1,
                                        home_row$Card_Diff,
                                        -home_row$Card_Diff)
+    home_row$meter_line_Team <- if_else(home_row$Possession == 1,
+                                   home_row$meter_line,
+                                   100 - home_row$meter_line)
     
     # Away perspective
     away_row$Team <- "Away"
@@ -160,9 +195,16 @@ phase_team <- phase_data %>%
     away_row$WinPct_Diff_Team <- if_else(away_row$Possession == 1,
                                          away_row$WinPct_Diff,
                                          -away_row$WinPct_Diff)
+    away_row$Scores_Ahead_Team <- if_else(away_row$Possession == 1,
+                                          away_row$Scores_Ahead,
+                                          -away_row$Scores_Ahead)
     away_row$Card_Diff_Team <- if_else(away_row$Possession == 1,
                                          away_row$Card_Diff,
                                          -away_row$Card_Diff)
+    away_row$meter_line_Team <- if_else(away_row$Possession == 1,
+                                        away_row$meter_line,
+                                        100 - away_row$meter_line)
+    
     
     bind_rows(home_row, away_row)
   }) %>%
@@ -173,23 +215,21 @@ phase_team <- phase_data %>%
 phase_team <- phase_team %>%
   mutate(adjusted_diff = Points_Diff_Team/((Seconds_Remaining+1)^0.5))
 
-
-###########################
-### Random Forest Model ###
-###########################
+######################
+### Model Training ###
+######################
 
 # Selecting predictors
 predictors <- c(
-  "Location",
+  "meter_line_Team",
   "Points_Diff_Team",
   "Seconds_Remaining",
   "WinPct_Diff_Team",
+  "Scores_Ahead_Team",
   "Card_Diff_Team",
   "Possession",
   "adjusted_diff"
 )
-
-# Not using: first_phase
 
 # Converting categorical variables to factors
 wp_model <- phase_team %>%
@@ -211,109 +251,55 @@ n_train <- floor(0.8 * nrow(wp_shuffled))
 train_data <- wp_shuffled[1:n_train, ]
 test_data  <- wp_shuffled[(n_train + 1):nrow(wp_shuffled), ]
 
-# Fitting
-library(randomForest)
+# Fitting Random Forest
 
 rf_fit <- randomForest(
   Win ~ .,
   data = train_data,
-  ntree = 250,
-  mtry = 2,
+  ntree = 500,
+  mtry = 3,
+  nodesize = 10,
   importance = TRUE
 )
 
 print(rf_fit)
 
-# Performance
-pred_class <- predict(rf_fit, test_data)
-pred_prob  <- predict(rf_fit, test_data, type = "prob")[, "1"]
-
-# Confusion Matrix
-table(
-  Predicted = pred_class,
-  Actual   = test_data$Win
-)
-
-# Accuracy
-mean(pred_class == test_data$Win)
-
 # Variable importance
-varImpPlot(rf_fit, type = 2)
 
-# Calibration
+var_imp <- as.data.frame(rf_fit$importance) %>%
+  rownames_to_column(var = "Variable") %>%
+  arrange(desc(MeanDecreaseGini))
 
-rf_prob <- predict(rf_fit, train_data, type = "prob")[, "1"]
-
-calib_fit <- glm(
-  Win ~ rf_prob,
-  data = train_data,
-  family = binomial
-)
-
-calib_fit
-
-# Win Prob of a test game (Exeter Perspective)
-
-example_game <- phase_team %>%
-  filter(
-    Round == 22,
-    Home == "Exeter",
-    Away == "Northampton",
-    Home_Attack == 1,
-    Team == "Home"
-  )
-
-#example_game <- phase_team %>%
-#  filter(
-#    Round == 22,
-#    Home == "Worcester",
-#    Away == "Saracens",
-#    Home_Attack == 1,
-#    Team == "Home"
-#  )
-
-example_game <- example_game %>%
-  dplyr::select(all_of(predictors)) %>%
-  mutate(
-    across(where(is.character), as.factor)
-  )
-
-# Aligning factors
-example_game <- example_game %>%
-  mutate(
-    across(
-      where(is.factor),
-      ~ factor(.x, levels = levels(wp_model[[cur_column()]]))
-    )
-  )
-
-example_game$Win_Prob <- predict(
-  rf_fit,
-  newdata = example_game,
-  type = "prob"
-)[, "1"]
-
-# Plotting win probs
-ggplot(example_game, aes(
-  x = Seconds_Remaining,
-  y = Win_Prob
-)) +
-  geom_line(linewidth = 1) +
-  scale_x_reverse() +
-  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+var_imp_plot <- ggplot(var_imp, aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_col(fill = "skyblue") +
+  coord_flip() +  # horizontal bars
   labs(
-    title = "Win Probability: Exeter vs Northampton",
-    x = "Seconds Remaining",
-    y = "Exeter Win Probability"
+    x = "Variable",
+    y = "Mean Decrease in Gini",
+    title = "Random Forest Variable Importance"
   ) +
   theme_minimal()
 
-###############
-### XGBoost ###
-###############
+# Save plot with ggsave
+ggsave("rf_variable_importance.png", var_imp_plot, width = 7, height = 5, dpi = 300)
 
-library(xgboost)
-library(Matrix)
+# Fitting logistic regression
+
+logit_train <- train_data %>%
+  mutate(Win = as.numeric(as.character(Win)))
+
+logit_fit <- glm(
+  Win ~ . - Seconds_Remaining,
+  data = logit_train,
+  family = binomial(link = "logit")
+)
+
+summary(logit_fit)
+
+# Fitting XGBoost
+
+train_data$Win <- as.integer(train_data$Win) - 1
+test_data$Win  <- as.integer(test_data$Win) - 1
 
 # Response
 y_train <- train_data$Win
@@ -330,37 +316,86 @@ feature_names <- colnames(X_train)
 
 # Monotinicity Constraints
 
-mono_constraints <- rep(0, length(feature_names))
-names(mono_constraints) <- feature_names
+mono_constraints <- rep(0, ncol(train_data) - 1)
+names(mono_constraints) <- colnames(train_data)[-1]
 
 mono_constraints["Points_Diff_Team"] <- 1
 mono_constraints["WinPct_Diff_Team"] <- 1
+mono_constraints["Scores_Ahead_Team"] <- 1
 mono_constraints["Card_Diff_Team"]   <- 1
 mono_constraints["Possession"]       <- 1
 mono_constraints["adjusted_diff"]    <- 1
-
-mono_string <- paste(mono_constraints, collapse = ",")
+mono_constraints["meter_line_Team"]  <- -1
 
 xgb_fit <- xgb.train(
   data = dtrain,
-  nrounds = 500,
+  nrounds = 2000,
+  watchlist = list(train = dtrain, test = dtest),
   objective = "binary:logistic",
-  monotone_constraints = mono_string,
+  monotone_constraints = mono_constraints,
   eval_metric = "logloss",
-  max_depth = 4,
-  eta = 0.05,
-  subsample = 0.8,
-  colsample_bytree = 0.8
+  max_depth = 3,
+  eta = 0.03,
+  subsample = 0.7,
+  colsample_bytree = 0.7,
+  min_child_weight = 50,
+  gamma = 1,
+  early_stopping_rounds = 30
 )
 
-# Probabilities
+importance <- xgb.importance(
+  model = xgb_fit,
+  feature_names = colnames(dtrain)
+)
+
+xgb.plot.importance(importance_matrix = importance)
+
+#########################
+### Model Performance ###
+#########################
+
+# Comparing Test Accuracies
+
+# Random Forest
+
+pred_class <- predict(rf_fit, test_data)
+pred_prob  <- predict(rf_fit, test_data, type = "prob")[, "1"]
+
+# Confusion Matrix
+table(
+  Predicted = pred_class,
+  Actual   = test_data$Win
+)
+
+# Accuracy
+mean(pred_class == test_data$Win)
+
+# Logistic
+
+test_data$Win_Prob_Logit <- predict(
+  logit_fit,
+  newdata = test_data,
+  type = "response"
+)
+
+test_data$Pred_Class <- ifelse(test_data$Win_Prob_Logit > 0.5, 1, 0)
+
+table(
+  Predicted = test_data$Pred_Class,
+  Actual   = test_data$Win
+)
+
+# Accuracy
+
+mean(test_data$Pred_Class == test_data$Win)
+
+
+# XGBoost
+
 xgb_prob <- predict(xgb_fit, dtest)
 
 # Classes
 xgb_class <- ifelse(xgb_prob > 0.5, 1, 0)
-
-# Accuracy
-mean(xgb_class == y_test)
 
 # Confusion matrix
 table(
@@ -368,98 +403,265 @@ table(
   Actual   = y_test
 )
 
-xgb_prob_train <- predict(xgb_fit, dtrain)
-
-calib_fit <- glm(
-  Win ~ xgb_prob_train,
-  family = binomial
-)
-
-###########################
-### Logistic Regression ###
-###########################
-
-glm_train <- train_data %>%
-  mutate(Win = as.numeric(as.character(Win)))
-
-glm_fit <- glm(
-  Win ~ .,
-  data = glm_train,
-  family = binomial(link = "logit")
-)
-
-summary(glm_fit)
-
-# Predicting on test data
-
-glm_test <- test_data %>%
-  mutate(Win = as.numeric(as.character(Win)))
-
-test_data$Win_Prob_Logit <- predict(
-  glm_fit,
-  newdata = glm_test,
-  type = "response"   # probabilities
-)
-
-# Model performance
-
-# Classification
-
-test_data$Pred_Class <- ifelse(test_data$Win_Prob_Logit > 0.5, 1, 0)
-
-table(
-  Predicted = test_data$Pred_Class,
-  Actual   = glm_test$Win
-)
-
 # Accuracy
+mean(xgb_class == y_test)
 
-mean(test_data$Pred_Class == glm_test$Win)
 
-# Comparing to Random forest
+#########################
+### Model Calibration ###
+#########################
 
+# Calibration
+
+# Random Forest
 test_data$Win_Prob_RF <- predict(
   rf_fit,
   newdata = test_data,
   type = "prob"
 )[, "1"]
 
-cor(test_data$Win_Prob_Logit, test_data$Win_Prob_RF)
+# Logistic
+test_data$Win_Prob_Logit <- predict(
+  logit_fit,
+  newdata = test_data,
+  type = "response"
+)
 
-# Callibration
+# XGBoost
+test_data$Win_Prob_XGB <- predict(
+  xgb_fit,
+  newdata = dtest
+)
 
-test_data %>%
-  mutate(
-    Win_num = as.numeric(as.character(Win)),
-    bin = ntile(Win_Prob_Logit, 10)
+calibration_df <- function(prob, y, n_bins = 10) {
+  tibble(
+    prob = prob,
+    y = y
   ) %>%
-  group_by(bin) %>%
-  summarise(
-    mean_pred = mean(Win_Prob_Logit),
-    win_rate  = mean(Win_num),
-    n = n(),
-    .groups = "drop"
+    mutate(
+      bin = ntile(prob, n_bins)
+    ) %>%
+    group_by(bin) %>%
+    summarise(
+      mean_pred = mean(prob),
+      win_rate  = mean(y),
+      n = n(),
+      .groups = "drop"
+    )
+}
+
+# Calibration tables
+
+cal_logit <- calibration_df(
+  test_data$Win_Prob_Logit,
+  test_data$Win
+)
+
+cal_rf <- calibration_df(
+  test_data$Win_Prob_RF,
+  test_data$Win
+)
+
+cal_xgb <- calibration_df(
+  test_data$Win_Prob_XGB,
+  test_data$Win
+)
+
+cal_all <- bind_rows(
+  cal_logit %>% mutate(model = "Logistic"),
+  cal_rf    %>% mutate(model = "Random Forest"),
+  cal_xgb   %>% mutate(model = "XGBoost")
+)
+
+# Calibration plot
+
+cal_plot <- ggplot(cal_all, aes(mean_pred, win_rate, color = model)) +
+  geom_line() +
+  geom_point() +
+  geom_abline(
+    slope = 1, intercept = 0,
+    linetype = "dashed", color = "grey50"
+  ) +
+  coord_equal() +
+  labs(
+    x = "Predicted Win Probability",
+    y = "Observed Win Rate",
+    title = "Calibration Curves (Test Set)"
+  ) +
+  theme_minimal()
+
+ggsave("calibration_plot.png", cal_plot, width = 7, height = 5, dpi = 300)
+
+######################
+### Game example #####
+######################
+
+# Example Game Random Forest
+
+example_game <- phase_team %>%
+  filter(
+    Round == 22,
+    Home == "Exeter",
+    Away == "Northampton",
+    Home_Attack == 1,
+    Team == "Home"
   )
 
-# Example Game
+example_game <- example_game %>%
+  dplyr::select(all_of(predictors)) %>%
+  mutate(
+    across(where(is.character), as.factor)
+  )
+
+# Aligning factors
+example_game <- example_game %>%
+  mutate(
+    across(
+      where(is.factor),
+      ~ factor(.x, levels = levels(wp_model[[cur_column()]]))
+    )
+  )
+
+example_game$Win_Prob_RF <- predict(
+  rf_fit,
+  newdata = example_game,
+  type = "prob"
+)[, "1"]
 
 example_game$Win_Prob_Logit <- predict(
-  glm_fit,
+  logit_fit,
   newdata = example_game,
   type = "response"
 )
 
-ggplot(example_game, aes(
+xgb_matrix_example <- xgb.DMatrix(
+  data = as.matrix(example_game[, predictors])
+)
+
+example_game$Win_Prob_XGB <- predict(
+  xgb_fit,
+  xgb_matrix_example
+)
+
+example_long <- example_game %>%
+  select(
+    Seconds_Remaining,
+    Win_Prob_RF,
+    Win_Prob_Logit,
+    Win_Prob_XGB
+  ) %>%
+  pivot_longer(
+    cols = starts_with("Win_Prob"),
+    names_to = "Model",
+    values_to = "Win_Prob"
+  ) %>%
+  mutate(
+    Model = recode(
+      Model,
+      Win_Prob_RF    = "Random Forest",
+      Win_Prob_Logit = "Logistic",
+      Win_Prob_XGB   = "XGBoost"
+    )
+  )
+
+# Scoring events
+
+score_changes <- example_game %>%
+  arrange(desc(Seconds_Remaining)) %>%
+  mutate(
+    score_change = Points_Diff_Team != lag(Points_Diff_Team)
+  ) %>%
+  filter(score_change) %>%
+  select(Seconds_Remaining, Points_Diff_Team)
+
+# Plotting Game
+
+example_plot <- ggplot(example_long, aes(
   x = Seconds_Remaining,
-  y = Win_Prob_Logit
+  y = Win_Prob
 )) +
-  geom_line() +
+  geom_line(linewidth = 1) +
+  geom_vline(
+    data = score_changes,
+    aes(xintercept = Seconds_Remaining),
+    linetype = "dotted",
+    colour = "grey40"
+  ) +
   scale_x_reverse() +
   scale_y_continuous(
-    limits = c(0, 1),
-    labels = scales::percent) +
+    labels = scales::percent,
+    limits = c(0, 1)
+  ) +
+  facet_wrap(~ Model, nrow = 1) +
   labs(
-    title = "Logistic Win Probability: Exeter vs Northampton",
+    title = "Win Probability — Exeter vs Northampton (Round 22)",
+    x = "Seconds Remaining",
     y = "Exeter Win Probability"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold")
+  )
+
+ggsave("example_game_plot.png", example_plot, width = 10, height = 4, dpi = 300)
+
+
+# Plotting Partials
+
+# Baseline values
+baseline <- train_data %>%
+  summarise(
+    across(
+      all_of(predictors),
+      ~ if (is.numeric(.)) median(., na.rm = TRUE) else {
+        names(sort(table(.), decreasing = TRUE))[1]
+      }
+    )
+  )
+
+partial_rf <- function(var, grid_length = 50) {
+  
+  grid_vals <- seq(
+    min(train_data[[var]], na.rm = TRUE),
+    max(train_data[[var]], na.rm = TRUE),
+    length.out = grid_length
+  )
+  
+  newdata <- baseline[rep(1, grid_length), ]
+  newdata[[var]] <- grid_vals
+  
+  newdata$Win_Prob_RF <- predict(
+    rf_fit,
+    newdata = newdata,
+    type = "prob"
+  )[,"1"]
+  
+  data.frame(
+    value = grid_vals,
+    win_prob = newdata$Win_Prob_RF
+  )
+}
+
+pd_list <- list(
+  "Field_Position" = partial_rf("meter_line_Team"),
+  "Points_Differential" = partial_rf("Points_Diff_Team"),
+  "Time_Remaining" = partial_rf("Seconds_Remaining"),
+  "Team_Strength" = partial_rf("WinPct_Diff_Team"),
+  "Scores_Ahead" = partial_rf("Scores_Ahead_Team"),
+  "Card_Differential" = partial_rf("Card_Diff_Team")
+)
+
+for (name in names(pd_list)) {
+  p <- ggplot(pd_list[[name]], aes(value, win_prob)) +
+    geom_line(linewidth = 1) +
+    labs(
+      x = name,
+      y = "Win Probability",
+      title = paste("Partial Dependence:", name)
+    ) +
+    theme_minimal()
+  
+  ggsave(paste0("partial_", tolower(gsub(" ", "_", name)), ".png"),
+         p, width = 7, height = 5, dpi = 300)
+}
+
