@@ -335,9 +335,9 @@ xgb_fit <- xgb.train(
   data = dtrain,
   nrounds = 2000,
   watchlist = list(train = dtrain, test = dtest),
-  objective = "binary:logistic",
+  objective = "reg:squarederror",  # regression
   monotone_constraints = mono_constraints,
-  eval_metric = "logloss",
+  eval_metric = "rmse",            # use RMSE instead of logloss
   max_depth = 3,
   eta = 0.03,
   subsample = 0.7,
@@ -372,58 +372,44 @@ ggsave("xgb_feature_importance.png", xgb_imp_plot, width = 7, height = 5, dpi = 
 ### Model Performance ###
 #########################
 
-# Comparing Test Accuracies
+rmse <- function(y, p) {
+  sqrt(mean((y - p)^2))
+}
 
 # Random Forest
 
-pred_class <- predict(rf_fit, test_data)
-pred_prob  <- predict(rf_fit, test_data, type = "prob")[, "1"]
+rf_prob <- predict(
+  rf_fit,
+  newdata = test_data,
+  type = "prob"
+)[, "1"]
 
-# Confusion Matrix
-table(
-  Predicted = pred_class,
-  Actual   = test_data$Win
-)
+rf_rmse <- rmse(test_data$Win, rf_prob)
 
-# Accuracy
-mean(pred_class == test_data$Win)
+# Logistic Regression
 
-# Logistic
-
-test_data$Win_Prob_Logit <- predict(
+logit_prob <- predict(
   logit_fit,
   newdata = test_data,
   type = "response"
 )
 
-test_data$Pred_Class <- ifelse(test_data$Win_Prob_Logit > 0.5, 1, 0)
-
-table(
-  Predicted = test_data$Pred_Class,
-  Actual   = test_data$Win
-)
-
-# Accuracy
-
-mean(test_data$Pred_Class == test_data$Win)
-
+logit_rmse <- rmse(test_data$Win, logit_prob)
 
 # XGBoost
 
 xgb_prob <- predict(xgb_fit, dtest)
 
-# Classes
-xgb_class <- ifelse(xgb_prob > 0.5, 1, 0)
+xgb_rmse <- rmse(y_test, xgb_prob)
 
-# Confusion matrix
-table(
-  Predicted = xgb_class,
-  Actual   = y_test
+# Results table
+
+results <- tibble(
+  Model = c("Logistic", "Random Forest", "XGBoost"),
+  RMSE  = c(logit_rmse, rf_rmse, xgb_rmse)
 )
 
-# Accuracy
-mean(xgb_class == y_test)
-
+results
 
 #########################
 ### Model Calibration ###
@@ -499,22 +485,31 @@ cal_all <- bind_rows(
 
 # Calibration plot
 
-cal_plot <- ggplot(cal_all, aes(mean_pred, win_rate, color = model)) +
-  geom_line() +
-  geom_point() +
-  geom_abline(
-    slope = 1, intercept = 0,
-    linetype = "dashed", color = "grey50"
-  ) +
-  coord_equal() +
-  labs(
-    x = "Predicted Win Probability",
-    y = "Observed Win Rate",
-    title = "Calibration Curves (Train Set)"
-  ) +
-  theme_minimal()
+plot_calibration <- function(cal_df, model_name) {
+  ggplot(cal_df, aes(mean_pred, win_rate)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    geom_abline(
+      slope = 1, intercept = 0,
+      linetype = "dashed", colour = "grey50"
+    ) +
+    coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+    labs(
+      title = paste("Calibration Curve —", model_name),
+      x = "Predicted Win Probability",
+      y = "Observed Win Rate"
+    ) +
+    theme_minimal()
+}
 
-ggsave("calibration_plot.png", cal_plot, width = 7, height = 5, dpi = 300)
+cal_plot_logit <- plot_calibration(cal_logit, "Logistic Regression")
+cal_plot_rf    <- plot_calibration(cal_rf, "Random Forest")
+cal_plot_xgb   <- plot_calibration(cal_xgb, "XGBoost")
+
+ggsave("calibration_logistic.png", cal_plot_logit, width = 6, height = 5, dpi = 300)
+ggsave("calibration_rf.png",        cal_plot_rf,    width = 6, height = 5, dpi = 300)
+ggsave("calibration_xgboost.png",   cal_plot_xgb,   width = 6, height = 5, dpi = 300)
+
 
 # R Squared
 
