@@ -50,15 +50,19 @@ last_play <- last_play %>%
   distinct()
 
 last_play <- last_play %>%
-  pivot_longer(cols = c(Home, Away),
-               names_to = "Side",
-               values_to = "Team") %>%
+  pivot_longer(
+    cols = c(Home, Away),
+    names_to = "Side",
+    values_to = "Team"
+  ) %>%
   mutate(
     Win = case_when(
-      Side == "Home" & Final_Points_Diff_Home > 0 ~ 1,
-      Side == "Home" & Final_Points_Diff_Home <= 0 ~ 0,
-      Side == "Away" & Final_Points_Diff_Home < 0 ~ 1,
-      Side == "Away" & Final_Points_Diff_Home >= 0 ~ 0
+      Side == "Home" & Final_Points_Diff_Home > 0  ~ 1,
+      Side == "Home" & Final_Points_Diff_Home == 0 ~ 0.5,   # draw
+      Side == "Home" & Final_Points_Diff_Home < 0  ~ 0,
+      Side == "Away" & Final_Points_Diff_Home < 0  ~ 1,
+      Side == "Away" & Final_Points_Diff_Home == 0 ~ 0.5,   # draw
+      Side == "Away" & Final_Points_Diff_Home > 0  ~ 0
     ),
     Round = as.numeric(Round)
   ) %>%
@@ -348,7 +352,21 @@ importance <- xgb.importance(
   feature_names = colnames(dtrain)
 )
 
-xgb.plot.importance(importance_matrix = importance)
+importance_df <- as.data.frame(importance) %>%
+  arrange(desc(Gain))  # Sort by Gain (or another metric)
+
+xgb_imp_plot <- ggplot(importance_df, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +  # horizontal bars
+  labs(
+    x = "Feature",
+    y = "Gain",
+    title = "XGBoost Feature Importance"
+  ) +
+  theme_minimal()
+
+# Save with ggsave
+ggsave("xgb_feature_importance.png", xgb_imp_plot, width = 7, height = 5, dpi = 300)
 
 #########################
 ### Model Performance ###
@@ -433,8 +451,9 @@ train_data$Win_Prob_XGB <- predict(
   newdata = dtrain
 )
 
-calibration_df_fixed <- function(prob, y, n_bins = 10) {
+calibration_df <- function(prob, y, n_bins = 20) {
   tibble(prob = prob, y = y) %>%
+    # Fixed bins along the predicted probability axis (0 to 1)
     mutate(
       bin = cut(
         prob,
@@ -445,12 +464,15 @@ calibration_df_fixed <- function(prob, y, n_bins = 10) {
     ) %>%
     group_by(bin) %>%
     summarise(
+      # Mean predicted probability in the bin
       mean_pred = mean(prob),
+      # Observed proportion of wins in the bin
       win_rate  = mean(y),
       n = n(),
       .groups = "drop"
     )
 }
+
 
 # Calibration tables
 
@@ -488,11 +510,22 @@ cal_plot <- ggplot(cal_all, aes(mean_pred, win_rate, color = model)) +
   labs(
     x = "Predicted Win Probability",
     y = "Observed Win Rate",
-    title = "Calibration Curves (Test Set)"
+    title = "Calibration Curves (Train Set)"
   ) +
   theme_minimal()
 
 ggsave("calibration_plot.png", cal_plot, width = 7, height = 5, dpi = 300)
+
+# R Squared
+
+r2_calibration <- cal_all %>%
+  group_by(model) %>%
+  summarise(
+    r2 = 1 - sum((win_rate - mean_pred)^2) / sum((win_rate - mean(win_rate))^2),
+    .groups = "drop"
+  )
+
+r2_calibration
 
 ######################
 ### Game example #####
