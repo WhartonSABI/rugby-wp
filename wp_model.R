@@ -6,6 +6,7 @@ library(xgboost)
 library(Matrix)
 library(randomForest)
 library(tidyr)
+library(isotone)
 
 setwd("/Users/kennywatts/Documents/Github/Rugby_wp")
 
@@ -235,27 +236,28 @@ predictors <- c(
   "adjusted_diff"
 )
 
-# Converting categorical variables to factors
+# Converting categorical variables to factors and recoding draw as 0
 wp_model <- phase_team %>%
   dplyr::select(Win, Round, all_of(predictors)) %>%
   mutate(
     across(where(is.character), as.factor),
-    Win = as.factor(Win)
+    # Recode Win: 1 = win, 0 = loss or draw
+    Win = ifelse(Win == 1, 1, 0)
   ) %>%
   na.omit()
 
 # Splitting and shuffling data
-
 wp_shuffled <- wp_model %>%
   dplyr::select(-Round) %>%
   dplyr::slice_sample(prop = 1)
 
 n_train <- floor(0.8 * nrow(wp_shuffled))
-
 train_data <- wp_shuffled[1:n_train, ]
 test_data  <- wp_shuffled[(n_train + 1):nrow(wp_shuffled), ]
 
-# Fitting Random Forest
+# Random Forest
+
+library(randomForest)
 
 rf_fit <- randomForest(
   Win ~ .,
@@ -268,26 +270,22 @@ rf_fit <- randomForest(
 
 print(rf_fit)
 
-# Variable importance
-
+# Variable importance plot
 var_imp <- as.data.frame(rf_fit$importance) %>%
   rownames_to_column(var = "Variable") %>%
-  arrange(desc(MeanDecreaseGini))
+  arrange(desc(`%IncMSE`))  # classification uses MeanDecreaseAccuracy
 
-var_imp_plot <- ggplot(var_imp, aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+var_imp_plot <- ggplot(var_imp, aes(x = reorder(Variable, `%IncMSE`), 
+                                    y = `%IncMSE`)) +
   geom_col(fill = "skyblue") +
-  coord_flip() +  # horizontal bars
-  labs(
-    x = "Variable",
-    y = "Mean Decrease in Gini",
-    title = "Random Forest Variable Importance"
-  ) +
+  coord_flip() +
+  labs(x = "Variable", y = "Mean Decrease Accuracy", 
+       title = "Random Forest Variable Importance") +
   theme_minimal()
 
-# Save plot with ggsave
 ggsave("rf_variable_importance.png", var_imp_plot, width = 7, height = 5, dpi = 300)
 
-# Fitting logistic regression
+# Logistic Regression
 
 logit_train <- train_data %>%
   mutate(Win = as.numeric(as.character(Win)))
@@ -298,27 +296,20 @@ logit_fit <- glm(
   family = binomial(link = "logit")
 )
 
-summary(logit_fit)
+logit_prob <- predict(logit_fit, newdata = test_data, type = "response")
 
-# Fitting XGBoost
+# XGBoost
 
-train_data$Win <- as.integer(train_data$Win) - 1
-test_data$Win  <- as.integer(test_data$Win) - 1
+library(xgboost)
 
-# Response
-y_train <- train_data$Win
-y_test  <- test_data$Win
+y_train <- as.numeric(as.character(train_data$Win))
+y_test  <- as.numeric(as.character(test_data$Win))
 
-# Design matrices (drop intercept)
 X_train <- model.matrix(Win ~ . - 1, data = train_data)
 X_test  <- model.matrix(Win ~ . - 1, data = test_data)
 
 dtrain <- xgb.DMatrix(data = X_train, label = y_train)
 dtest  <- xgb.DMatrix(data = X_test, label = y_test)
-
-feature_names <- colnames(X_train)
-
-# Monotinicity Constraints
 
 mono_constraints <- rep(0, ncol(train_data) - 1)
 names(mono_constraints) <- colnames(train_data)[-1]
@@ -335,9 +326,9 @@ xgb_fit <- xgb.train(
   data = dtrain,
   nrounds = 2000,
   watchlist = list(train = dtrain, test = dtest),
-  objective = "reg:squarederror",  # regression
+  objective = "binary:logistic",
   monotone_constraints = mono_constraints,
-  eval_metric = "rmse",            # use RMSE instead of logloss
+  eval_metric = "logloss",
   max_depth = 3,
   eta = 0.03,
   subsample = 0.7,
@@ -347,62 +338,19 @@ xgb_fit <- xgb.train(
   early_stopping_rounds = 30
 )
 
-importance <- xgb.importance(
-  model = xgb_fit,
-  feature_names = colnames(dtrain)
-)
-
-importance_df <- as.data.frame(importance) %>%
-  arrange(desc(Gain))  # Sort by Gain (or another metric)
-
-xgb_imp_plot <- ggplot(importance_df, aes(x = reorder(Feature, Gain), y = Gain)) +
-  geom_col(fill = "steelblue") +
-  coord_flip() +  # horizontal bars
-  labs(
-    x = "Feature",
-    y = "Gain",
-    title = "XGBoost Feature Importance"
-  ) +
-  theme_minimal()
-
-# Save with ggsave
-ggsave("xgb_feature_importance.png", xgb_imp_plot, width = 7, height = 5, dpi = 300)
-
-#########################
-### Model Performance ###
-#########################
-
-rmse <- function(y, p) {
-  sqrt(mean((y - p)^2))
-}
-
-# Random Forest
-
-rf_prob <- predict(
-  rf_fit,
-  newdata = test_data,
-  type = "prob"
-)[, "1"]
-
-rf_rmse <- rmse(test_data$Win, rf_prob)
-
-# Logistic Regression
-
-logit_prob <- predict(
-  logit_fit,
-  newdata = test_data,
-  type = "response"
-)
-
-logit_rmse <- rmse(test_data$Win, logit_prob)
-
-# XGBoost
-
 xgb_prob <- predict(xgb_fit, dtest)
 
-xgb_rmse <- rmse(y_test, xgb_prob)
 
-# Results table
+# Model Performance
+
+rmse <- function(y, p) sqrt(mean((y - p)^2))
+
+y_true <- as.numeric(as.character(test_data$Win))
+
+# Compute RMSE
+rf_rmse <- rmse(y_true, rf_pred)
+logit_rmse <- rmse(y_true, logit_prob)
+xgb_rmse <- rmse(y_true, xgb_prob)
 
 results <- tibble(
   Model = c("Logistic", "Random Forest", "XGBoost"),
@@ -410,6 +358,7 @@ results <- tibble(
 )
 
 results
+
 
 #########################
 ### Model Calibration ###
@@ -421,8 +370,7 @@ results
 train_data$Win_Prob_RF <- predict(
   rf_fit,
   newdata = train_data,
-  type = "prob"
-)[, "1"]
+)
 
 # Logistic
 logit_train$Win_Prob_Logit <- predict(
@@ -469,12 +417,12 @@ cal_logit <- calibration_df(
 
 cal_rf <- calibration_df(
   train_data$Win_Prob_RF,
-  train_data$Win
+  as.numeric(train_data$Win)
 )
 
 cal_xgb <- calibration_df(
   train_data$Win_Prob_XGB,
-  train_data$Win
+  as.numeric(train_data$Win)
 )
 
 cal_all <- bind_rows(
@@ -555,8 +503,7 @@ example_game <- example_game %>%
 example_game$Win_Prob_RF <- predict(
   rf_fit,
   newdata = example_game,
-  type = "prob"
-)[, "1"]
+)
 
 example_game$Win_Prob_Logit <- predict(
   logit_fit,
@@ -636,7 +583,7 @@ example_plot <- ggplot(example_long, aes(
 ggsave("example_game_plot.png", example_plot, width = 10, height = 4, dpi = 300)
 
 
-# Plotting Partials
+# Plotting Random Forest Partials
 
 # Baseline values
 baseline <- train_data %>%
@@ -693,5 +640,59 @@ for (name in names(pd_list)) {
   
   ggsave(paste0("partial_", tolower(gsub(" ", "_", name)), ".png"),
          p, width = 7, height = 5, dpi = 300)
+}
+
+# Plotting xgboost partials
+
+partial_xgb <- function(var, grid_length = 50) {
+  
+  grid_vals <- seq(
+    min(train_data[[var]], na.rm = TRUE),
+    max(train_data[[var]], na.rm = TRUE),
+    length.out = grid_length
+  )
+  
+  newdata <- baseline[rep(1, grid_length), ]
+  newdata[[var]] <- grid_vals
+  
+  # XGBoost requires a matrix / DMatrix
+  xgb_mat <- xgb.DMatrix(
+    data = as.matrix(newdata[, predictors])
+  )
+  
+  newdata$Win_Prob_XGB <- predict(
+    xgb_fit,
+    xgb_mat
+  )
+  
+  data.frame(
+    value = grid_vals,
+    win_prob = newdata$Win_Prob_XGB
+  )
+}
+
+pd_list_xgb <- list(
+  "Field_Position"      = partial_xgb("meter_line_Team"),
+  "Points_Differential" = partial_xgb("Points_Diff_Team"),
+  "Time_Remaining"      = partial_xgb("Seconds_Remaining"),
+  "Team_Strength"       = partial_xgb("WinPct_Diff_Team"),
+  "Scores_Ahead"        = partial_xgb("Scores_Ahead_Team"),
+  "Card_Differential"   = partial_xgb("Card_Diff_Team")
+)
+
+for (name in names(pd_list_xgb)) {
+  p <- ggplot(pd_list_xgb[[name]], aes(value, win_prob)) +
+    geom_line(linewidth = 1) +
+    labs(
+      x = name,
+      y = "Win Probability",
+      title = paste("Partial Dependence (XGBoost):", name)
+    ) +
+    theme_minimal()
+  
+  ggsave(
+    paste0("partial_xgb_", tolower(gsub(" ", "_", name)), ".png"),
+    p, width = 7, height = 5, dpi = 300
+  )
 }
 
