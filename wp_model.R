@@ -255,6 +255,18 @@ n_train <- floor(0.8 * nrow(wp_shuffled))
 train_data <- wp_shuffled[1:n_train, ]
 test_data  <- wp_shuffled[(n_train + 1):nrow(wp_shuffled), ]
 
+logit_train <- train_data %>%
+  mutate(Win = as.numeric(as.character(Win)))
+
+logit_test <- test_data %>%
+  mutate(Win = as.numeric(as.character(Win)))
+
+train_data <- train_data %>%
+  mutate(Win = as.factor(Win))
+
+test_data <- test_data %>%
+  mutate(Win = as.factor(Win))
+
 # Random Forest
 
 library(randomForest)
@@ -264,7 +276,7 @@ rf_fit <- randomForest(
   data = train_data,
   ntree = 500,
   mtry = 3,
-  nodesize = 10,
+  nodesize = 50,
   importance = TRUE
 )
 
@@ -272,11 +284,11 @@ print(rf_fit)
 
 # Variable importance plot
 var_imp <- as.data.frame(rf_fit$importance) %>%
-  rownames_to_column(var = "Variable") %>%
-  arrange(desc(`%IncMSE`))  # classification uses MeanDecreaseAccuracy
+  rownames_to_column("Variable") %>%
+  arrange(desc(MeanDecreaseAccuracy))
 
-var_imp_plot <- ggplot(var_imp, aes(x = reorder(Variable, `%IncMSE`), 
-                                    y = `%IncMSE`)) +
+var_imp_plot <- ggplot(var_imp, aes(x = reorder(Variable, MeanDecreaseAccuracy), 
+                                    y = MeanDecreaseAccuracy)) +
   geom_col(fill = "skyblue") +
   coord_flip() +
   labs(x = "Variable", y = "Mean Decrease Accuracy", 
@@ -285,10 +297,13 @@ var_imp_plot <- ggplot(var_imp, aes(x = reorder(Variable, `%IncMSE`),
 
 ggsave("rf_variable_importance.png", var_imp_plot, width = 7, height = 5, dpi = 300)
 
-# Logistic Regression
+rf_prob <- predict(
+  rf_fit,
+  newdata = test_data,
+  type = "prob"
+)[, "1"]
 
-logit_train <- train_data %>%
-  mutate(Win = as.numeric(as.character(Win)))
+# Logistic Regression
 
 logit_fit <- glm(
   Win ~ . - Seconds_Remaining,
@@ -296,7 +311,10 @@ logit_fit <- glm(
   family = binomial(link = "logit")
 )
 
-logit_prob <- predict(logit_fit, newdata = test_data, type = "response")
+logit_prob <- predict(logit_fit, 
+                      newdata = logit_test, 
+                      type = "response")
+
 
 # XGBoost
 
@@ -348,7 +366,7 @@ rmse <- function(y, p) sqrt(mean((y - p)^2))
 y_true <- as.numeric(as.character(test_data$Win))
 
 # Compute RMSE
-rf_rmse <- rmse(y_true, rf_pred)
+rf_rmse <- rmse(y_true, rf_prob)
 logit_rmse <- rmse(y_true, logit_prob)
 xgb_rmse <- rmse(y_true, xgb_prob)
 
@@ -370,7 +388,9 @@ results
 train_data$Win_Prob_RF <- predict(
   rf_fit,
   newdata = train_data,
-)
+  type = "prob"
+)[, "1"]
+
 
 # Logistic
 logit_train$Win_Prob_Logit <- predict(
@@ -417,12 +437,12 @@ cal_logit <- calibration_df(
 
 cal_rf <- calibration_df(
   train_data$Win_Prob_RF,
-  as.numeric(train_data$Win)
+  as.numeric(as.character(train_data$Win))
 )
 
 cal_xgb <- calibration_df(
   train_data$Win_Prob_XGB,
-  as.numeric(train_data$Win)
+  as.numeric(as.character(train_data$Win))
 )
 
 cal_all <- bind_rows(
@@ -503,7 +523,8 @@ example_game <- example_game %>%
 example_game$Win_Prob_RF <- predict(
   rf_fit,
   newdata = example_game,
-)
+  type = "prob"
+)[, "1"]
 
 example_game$Win_Prob_Logit <- predict(
   logit_fit,
