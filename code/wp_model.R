@@ -8,6 +8,8 @@ library(randomForest)
 library(tidyr)
 library(isotone)
 
+# setwd("/Users/kennywatts/Documents/Github/Rugby_wp")
+
 # load data
 phase_data = read.csv("data/phase_2018-19.csv")
 
