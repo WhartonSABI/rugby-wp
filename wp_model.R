@@ -270,12 +270,80 @@ test_data <- test_data %>%
 # Random Forest
 
 library(randomForest)
+library(ModelMetrics)
+
+# Tuning Parameters
+
+p <- ncol(train_data) - 1   # number of predictors
+
+rf_grid <- expand.grid(
+  mtry = unique(round(c(
+    sqrt(p),
+    p / 4,
+    p / 3,
+    p / 2
+  ))),
+  nodesize = c(1, 5, 10, 25, 50)
+)
+
+rf_grid
+
+fit_rf_once <- function(mtry, nodesize, train_data, test_data) {
+  
+  rf_fit <- randomForest(
+    Win ~ .,
+    data = train_data,
+    ntree = 500,
+    mtry = mtry,
+    nodesize = nodesize,
+    importance = FALSE
+  )
+  
+  # Predict probabilities for positive class "1"
+  prob <- predict(rf_fit, test_data, type = "prob")[, "1"]
+  
+  eps <- 1e-15
+  prob <- pmin(pmax(prob, eps), 1 - eps)
+  
+  tibble(
+    logloss = ModelMetrics::logLoss(
+      actual = as.numeric(test_data$Win),
+      predicted = prob
+    )
+  )
+}
+
+#rf_results <- rf_grid %>%
+#  dplyr::mutate(
+#    results = purrr::pmap(
+#      list(mtry, nodesize),
+#      ~ fit_rf_once(
+#        mtry = ..1,
+#        nodesize = ..2,
+#        train_data = train_data,
+#        test_data = test_data
+#      )
+#    )
+#  ) %>%
+#  tidyr::unnest(results)
+
+#rf_results
+
+
+# Best Parameters
+
+#best_rf <- rf_results %>%
+#  arrange(logloss) %>%
+#  dplyr::slice(1)
+
+#best_rf
+
 
 rf_fit <- randomForest(
   Win ~ .,
   data = train_data,
   ntree = 500,
-  mtry = 3,
+  mtry = 4,
   nodesize = 50,
   importance = TRUE
 )
@@ -340,6 +408,93 @@ mono_constraints["Possession"]       <- 1
 mono_constraints["adjusted_diff"]    <- 1
 mono_constraints["meter_line_Team"]  <- -1
 
+# Parameter Tuning Grid
+
+grid_size <- 30
+
+xgb_grid <- tibble(
+  max_depth = sample(2:6, grid_size, replace = TRUE),
+  eta = 10^runif(grid_size, -1.5, -0.5),
+  min_child_weight = sample(c(10, 20, 30, 50, 80), grid_size, replace = TRUE),
+  gamma = runif(grid_size, 0, 5),
+  subsample = runif(grid_size, 0.5, 0.9),
+  colsample_bytree = runif(grid_size, 0.5, 0.9)
+) %>%
+  mutate(
+    monotone_constraints = list(mono_constraints)
+  )
+
+xgb_grid
+
+# Tuning
+
+fit_xgb_once <- function(params, dtrain, dtest) {
+  
+  model <- xgb.train(
+    data = dtrain,
+    nrounds = 2000,
+    watchlist = list(train = dtrain, test = dtest),
+    objective = "binary:logistic",
+    eval_metric = "logloss",
+    early_stopping_rounds = 30,
+    
+    max_depth = params$max_depth,
+    eta = params$eta,
+    min_child_weight = params$min_child_weight,
+    gamma = params$gamma,
+    subsample = params$subsample,
+    colsample_bytree = params$colsample_bytree,
+    monotone_constraints = params$monotone_constraints,
+    
+    verbose = 0
+  )
+  
+  tibble(
+    best_iter = model$best_iteration,
+    test_logloss = model$best_score
+  )
+}
+
+#tuning_results <- xgb_grid %>%
+#  mutate(
+#    results = pmap(
+#      list(
+#        max_depth,
+#        eta,
+#        min_child_weight,
+#        gamma,
+#        subsample,
+#        colsample_bytree,
+#        monotone_constraints
+#      ),
+#      ~ fit_xgb_once(
+#        params = list(
+#          max_depth = ..1,
+#          eta = ..2,
+#          min_child_weight = ..3,
+#          gamma = ..4,
+#          subsample = ..5,
+#          colsample_bytree = ..6,
+#          monotone_constraints = ..7
+#        ),
+#        dtrain = dtrain,
+#        dtest = dtest
+#      )
+#    )
+#  ) %>%
+#  unnest(results)
+#
+#tuning_results
+
+# Best Params
+
+# best_params <- tuning_results %>%
+#  arrange(test_logloss) %>%
+#  dplyr::slice(1)
+
+# best_params
+
+
 xgb_fit <- xgb.train(
   data = dtrain,
   nrounds = 2000,
@@ -347,12 +502,12 @@ xgb_fit <- xgb.train(
   objective = "binary:logistic",
   monotone_constraints = mono_constraints,
   eval_metric = "logloss",
-  max_depth = 3,
-  eta = 0.03,
-  subsample = 0.7,
-  colsample_bytree = 0.7,
-  min_child_weight = 50,
-  gamma = 1,
+  max_depth = 6,
+  eta = 0.167,
+  subsample = 0.572,
+  colsample_bytree = 0.896,
+  min_child_weight = 10,
+  gamma = 3.92,
   early_stopping_rounds = 30
 )
 
