@@ -489,8 +489,8 @@ fit_xgb_once <- function(params, dtrain, dtest) {
 # Best Params
 
 # best_params <- tuning_results %>%
-  arrange(test_logloss) %>%
-  dplyr::slice(1)
+#  arrange(test_logloss) %>%
+#  dplyr::slice(1)
 
 # best_params
 
