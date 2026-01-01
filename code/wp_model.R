@@ -418,17 +418,17 @@ calibration_df <- function(prob, y, n_bins = 20) {
 # Calibration tables (using out-of-sample test data)
 
 cal_logit <- calibration_df(
-  logit_prob,
-  logit_test$Win
+  logit_pred,
+  y_test
 )
 
 cal_rf <- calibration_df(
-  rf_prob,
+  rf_pred,
   y_test
 )
 
 cal_xgb <- calibration_df(
-  xgb_prob,
+  xgb_pred,
   y_test
 )
 
@@ -507,25 +507,30 @@ example_game <- example_game %>%
     )
   )
 
-example_game$Win_Prob_RF <- predict(
-  rf_fit,
-  newdata = example_game,
-  type = "prob"
-)[, "1"]
 
-example_game$Win_Prob_Logit <- predict(
-  logit_fit,
-  newdata = example_game,
-  type = "response"
+X_example <- model.matrix(
+  ~ . - 1,
+  data = example_game[, predictors]
 )
 
 xgb_matrix_example <- xgb.DMatrix(
-  data = as.matrix(example_game[, predictors])
+  data = X_example
 )
 
 example_game$Win_Prob_XGB <- predict(
   xgb_fit,
   xgb_matrix_example
+)
+
+example_game$Win_Prob_RF <- predict(
+  rf_fit,
+  newdata = example_game
+)
+
+example_game$Win_Prob_Logit <- predict(
+  logit_fit,
+  newdata = example_game,
+  type = "response"
 )
 
 example_long <- example_game %>%
@@ -615,28 +620,72 @@ partial_rf <- function(var, grid_length = 50) {
   newdata <- baseline[rep(1, grid_length), ]
   newdata[[var]] <- grid_vals
   
-  newdata$Win_Prob_RF <- predict(
+  win_prob <- predict(
     rf_fit,
-    newdata = newdata,
-    type = "prob"
-  )[,"1"]
+    newdata = newdata
+  )
   
   data.frame(
     value = grid_vals,
-    win_prob = newdata$Win_Prob_RF
+    win_prob = win_prob
   )
 }
 
+partial_rf_seconds_by_score <- function(
+    seconds_var = "Seconds_Remaining",
+    points_var  = "Points_Diff_Team",
+    scores_var  = "Scores_Ahead_Team",
+    adj_var     = "adjusted_diff",
+    score_vals  = c(-7, 7),
+    grid_length = 50
+) {
+  
+  grid_vals <- seq(
+    min(train_data[[seconds_var]], na.rm = TRUE),
+    max(train_data[[seconds_var]], na.rm = TRUE),
+    length.out = grid_length
+  )
+  
+  pd_list <- lapply(score_vals, function(s) {
+    
+    newdata <- baseline[rep(1, grid_length), ]
+    
+    # Set time
+    newdata[[seconds_var]] <- grid_vals
+    
+    # Set score state
+    newdata[[points_var]] <- s
+    
+    # Derived variables (MUST be consistent)
+    newdata[[scores_var]] <- as.integer(s > 0)
+    newdata[[adj_var]]    <- s / sqrt(grid_vals + 1)
+    
+    data.frame(
+      Seconds_Remaining = grid_vals,
+      win_prob = predict(rf_fit, newdata),
+      Score_State = ifelse(
+        s > 0,
+        paste0("+", s, " (Good)"),
+        paste0(s, " (Bad)")
+      )
+    )
+  })
+  
+  dplyr::bind_rows(pd_list)
+}
+
 pd_list <- list(
-  "Field_Position" = partial_rf("meter_line_Team"),
-  "Points_Differential" = partial_rf("Points_Diff_Team"),
-  "Time_Remaining" = partial_rf("Seconds_Remaining"),
-  "Team_Strength" = partial_rf("WinPct_Diff_Team"),
-  "Scores_Ahead" = partial_rf("Scores_Ahead_Team"),
-  "Card_Differential" = partial_rf("Card_Diff_Team")
+  "Field_Position"     = partial_rf("meter_line_Team"),
+  "Points_Differential"= partial_rf("Points_Diff_Team"),
+  "Team_Strength"      = partial_rf("WinPct_Diff_Team"),
+  "Scores_Ahead"       = partial_rf("Scores_Ahead_Team"),
+  "Card_Differential"  = partial_rf("Card_Diff_Team")
 )
 
+pd_seconds <- partial_rf_seconds_by_score()
+
 for (name in names(pd_list)) {
+  
   p <- ggplot(pd_list[[name]], aes(value, win_prob)) +
     geom_line(linewidth = 1) +
     labs(
@@ -646,9 +695,37 @@ for (name in names(pd_list)) {
     ) +
     theme_minimal()
   
-  ggsave(paste0("plots/partial_", tolower(gsub(" ", "_", name)), ".png"),
-         p, width = 7, height = 5, dpi = 300)
+  ggsave(
+    paste0("plots/partial_", tolower(gsub(" ", "_", name)), ".png"),
+    p,
+    width = 7,
+    height = 5,
+    dpi = 300
+  )
 }
+
+p_seconds <- ggplot(
+  pd_seconds,
+  aes(Seconds_Remaining, win_prob, color = Score_State)
+) +
+  geom_line(linewidth = 1) +
+  labs(
+    x = "Seconds Remaining",
+    y = "Win Probability",
+    title = "Partial Dependence of Time Remaining\nby Score Differential"
+  ) +
+  theme_minimal() +
+  scale_color_manual(
+    values = c("firebrick", "steelblue")
+  )
+
+ggsave(
+  "plots/partial_seconds_remaining_by_score.png",
+  p_seconds,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
 
 # Plotting xgboost partials
 
@@ -660,35 +737,92 @@ partial_xgb <- function(var, grid_length = 50) {
     length.out = grid_length
   )
   
-  newdata <- baseline[rep(1, grid_length), ]
+  newdata <- baseline[rep(1, grid_length), predictors, drop = FALSE]
   newdata[[var]] <- grid_vals
   
-  # XGBoost requires a matrix / DMatrix
-  xgb_mat <- xgb.DMatrix(
-    data = as.matrix(newdata[, predictors])
+  X_new <- model.matrix(
+    ~ . - 1,
+    data = newdata
   )
   
-  newdata$Win_Prob_XGB <- predict(
-    xgb_fit,
-    xgb_mat
-  )
+  # Ensure column alignment
+  X_new <- X_new[, colnames(X_train), drop = FALSE]
+  
+  xgb_mat <- xgb.DMatrix(X_new)
   
   data.frame(
     value = grid_vals,
-    win_prob = newdata$Win_Prob_XGB
+    win_prob = predict(xgb_fit, xgb_mat)
   )
 }
+
+partial_xgb_seconds_by_score <- function(
+    seconds_var = "Seconds_Remaining",
+    points_var  = "Points_Diff_Team",
+    scores_var  = "Scores_Ahead_Team",
+    adj_var     = "adjusted_diff",
+    score_vals  = c(-7, 7),
+    grid_length = 50
+) {
+  
+  grid_vals <- seq(
+    min(train_data[[seconds_var]], na.rm = TRUE),
+    max(train_data[[seconds_var]], na.rm = TRUE),
+    length.out = grid_length
+  )
+  
+  pd_list <- lapply(score_vals, function(s) {
+    
+    newdata <- baseline[rep(1, grid_length), predictors, drop = FALSE]
+    
+    # Set time
+    newdata[[seconds_var]] <- grid_vals
+    
+    # Set score state
+    newdata[[points_var]] <- s
+    
+    # Derived variables (MUST be consistent)
+    newdata[[scores_var]] <- as.integer(s > 0)
+    newdata[[adj_var]]    <- s / sqrt(grid_vals + 1)
+    
+    # Build matrix exactly as in training
+    X_new <- model.matrix(
+      ~ . - 1,
+      data = newdata
+    )
+    
+    # Enforce column alignment
+    X_new <- X_new[, colnames(X_train), drop = FALSE]
+    
+    xgb_mat <- xgb.DMatrix(X_new)
+    
+    data.frame(
+      Seconds_Remaining = grid_vals,
+      win_prob = predict(xgb_fit, xgb_mat),
+      Score_State = ifelse(
+        s > 0,
+        paste0("+", s, " (Good)"),
+        paste0(s, " (Bad)")
+      )
+    )
+  })
+  
+  dplyr::bind_rows(pd_list)
+}
+
 
 pd_list_xgb <- list(
   "Field_Position"      = partial_xgb("meter_line_Team"),
   "Points_Differential" = partial_xgb("Points_Diff_Team"),
-  "Time_Remaining"      = partial_xgb("Seconds_Remaining"),
   "Team_Strength"       = partial_xgb("WinPct_Diff_Team"),
   "Scores_Ahead"        = partial_xgb("Scores_Ahead_Team"),
   "Card_Differential"   = partial_xgb("Card_Diff_Team")
 )
 
+pd_seconds_xgb <- partial_xgb_seconds_by_score()
+
 for (name in names(pd_list_xgb)) {
+  
   p <- ggplot(pd_list_xgb[[name]], aes(value, win_prob)) +
     geom_line(linewidth = 1) +
     labs(
@@ -700,11 +834,35 @@ for (name in names(pd_list_xgb)) {
   
   ggsave(
     paste0("plots/partial_xgb_", tolower(gsub(" ", "_", name)), ".png"),
-    p, width = 7, height = 5, dpi = 300
+    p,
+    width = 7,
+    height = 5,
+    dpi = 300
   )
 }
 
+p_seconds_xgb <- ggplot(
+  pd_seconds_xgb,
+  aes(Seconds_Remaining, win_prob, color = Score_State)
+) +
+  geom_line(linewidth = 1) +
+  labs(
+    x = "Seconds Remaining",
+    y = "Win Probability",
+    title = "Partial Dependence (XGBoost): Time Remaining\nby Score Differential"
+  ) +
+  theme_minimal() +
+  scale_color_manual(
+    values = c("firebrick", "steelblue")
+  )
 
+ggsave(
+  "plots/partial_xgb_seconds_remaining_by_score.png",
+  p_seconds_xgb,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
 
 
 
