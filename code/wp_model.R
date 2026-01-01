@@ -265,8 +265,8 @@ rf_fit <- randomForest(
   Win ~ .,
   data = train_data,
   ntree = 500,
-  mtry = 4,
-  nodesize = 50,
+  mtry = 3,
+  nodesize = 25,
   importance = TRUE
 )
 
@@ -346,12 +346,10 @@ xgb_fit <- xgb.train(
   objective = "reg:logistic",   # regression → output in [0,1]
   monotone_constraints = mono_constraints,
   eval_metric = "rmse",
-  max_depth = 6,
-  eta = 0.167,
-  subsample = 0.572,
-  colsample_bytree = 0.896,
-  min_child_weight = 10,
-  gamma = 3.92,
+  max_depth = 3,
+  eta = 0.1,
+  min_child_weight = 20,
+  gamma = 5,
   early_stopping_rounds = 30
 )
 
@@ -657,7 +655,7 @@ partial_rf_seconds_by_score <- function(
     newdata[[points_var]] <- s
     
     # Derived variables (MUST be consistent)
-    newdata[[scores_var]] <- as.integer(s > 0)
+    newdata[[scores_var]] <- 2 * as.integer(s > 0) - 1
     newdata[[adj_var]]    <- s / sqrt(grid_vals + 1)
     
     data.frame(
@@ -782,7 +780,7 @@ partial_xgb_seconds_by_score <- function(
     newdata[[points_var]] <- s
     
     # Derived variables (MUST be consistent)
-    newdata[[scores_var]] <- as.integer(s > 0)
+    newdata[[scores_var]] <- 2 * as.integer(s > 0) - 1
     newdata[[adj_var]]    <- s / sqrt(grid_vals + 1)
     
     # Build matrix exactly as in training
