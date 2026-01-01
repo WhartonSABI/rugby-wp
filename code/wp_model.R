@@ -237,15 +237,16 @@ predictors <- c(
   "adjusted_diff"
 )
 
-# Converting categorical variables to factors and recoding draw as 0
+# Converting categorical variables to factors and making sure Win is numeric
+
 wp_model <- phase_team %>%
-  dplyr::select(Win, Round, all_of(predictors)) %>%
+  select(Win, Round, all_of(predictors)) %>%
   mutate(
-    across(where(is.character), as.factor),
-    # Recode Win: 1 = win, 0 = loss or draw
-    Win = ifelse(Win == 1, 1, 0)
+    Win = as.numeric(as.character(Win)),
+    across(where(is.character), as.factor)
   ) %>%
   na.omit()
+
 
 # Splitting and shuffling data
 wp_shuffled <- wp_model %>%
@@ -256,18 +257,6 @@ n_train <- floor(0.8 * nrow(wp_shuffled))
 train_data <- wp_shuffled[1:n_train, ]
 test_data  <- wp_shuffled[(n_train + 1):nrow(wp_shuffled), ]
 
-logit_train <- train_data %>%
-  mutate(Win = as.numeric(as.character(Win)))
-
-logit_test <- test_data %>%
-  mutate(Win = as.numeric(as.character(Win)))
-
-train_data <- train_data %>%
-  mutate(Win = as.factor(Win))
-
-test_data <- test_data %>%
-  mutate(Win = as.factor(Win))
-
 # Random Forest
 
 library(randomForest)
@@ -276,62 +265,71 @@ rf_fit <- randomForest(
   Win ~ .,
   data = train_data,
   ntree = 500,
-  mtry = 3,
-  nodesize = 5,
+  mtry = 4,
+  nodesize = 50,
   importance = TRUE
 )
 
-print(rf_fit)
+rf_pred <- predict(rf_fit, newdata = test_data)
 
 # Variable importance plot
-var_imp <- as.data.frame(rf_fit$importance) %>%
-  rownames_to_column("Variable") %>%
-  arrange(desc(MeanDecreaseAccuracy))
 
-var_imp_plot <- ggplot(var_imp, aes(x = reorder(Variable, MeanDecreaseAccuracy), 
-                                    y = MeanDecreaseAccuracy)) +
+var_imp <- as.data.frame(importance(rf_fit)) %>%
+  rownames_to_column("Variable") %>%
+  arrange(desc(IncNodePurity))
+
+var_imp_plot <- ggplot(
+  var_imp,
+  aes(x = reorder(Variable, IncNodePurity), y = IncNodePurity)
+) +
   geom_col(fill = "skyblue") +
   coord_flip() +
-  labs(x = "Variable", y = "Mean Decrease Accuracy", 
-       title = "Random Forest Variable Importance") +
+  labs(
+    x = "Variable",
+    y = "Increase in Node Purity",
+    title = "Random Forest Variable Importance (Regression)"
+  ) +
   theme_minimal()
 
-ggsave("plots/rf_variable_importance.png", var_imp_plot, width = 7, height = 5, dpi = 300)
-
-rf_prob <- predict(
-  rf_fit,
-  newdata = test_data,
-  type = "prob"
-)[, "1"]
+ggsave(
+  "plots/rf_variable_importance.png",
+  var_imp_plot,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
 
 # Logistic Regression
 
 logit_fit <- glm(
   Win ~ . - Seconds_Remaining,
-  data = logit_train,
+  data = train_data,
   family = binomial(link = "logit")
 )
 
-logit_prob <- predict(logit_fit, 
-                      newdata = logit_test, 
-                      type = "response")
+logit_pred <- predict(
+  logit_fit,
+  newdata = test_data,
+  type = "response"
+)
 
 
 # XGBoost
 
 library(xgboost)
 
-y_train <- as.numeric(as.character(train_data$Win))
-y_test  <- as.numeric(as.character(test_data$Win))
-
 X_train <- model.matrix(Win ~ . - 1, data = train_data)
 X_test  <- model.matrix(Win ~ . - 1, data = test_data)
 
-dtrain <- xgb.DMatrix(data = X_train, label = y_train)
-dtest  <- xgb.DMatrix(data = X_test, label = y_test)
+y_train <- train_data$Win
+y_test  <- test_data$Win
 
-mono_constraints <- rep(0, ncol(train_data) - 1)
-names(mono_constraints) <- colnames(train_data)[-1]
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest  <- xgb.DMatrix(data = X_test,  label = y_test)
+
+# Monotonicity constraints
+mono_constraints <- rep(0, ncol(X_train))
+names(mono_constraints) <- colnames(X_train)
 
 mono_constraints["Points_Diff_Team"] <- 1
 mono_constraints["WinPct_Diff_Team"] <- 1
@@ -345,19 +343,19 @@ xgb_fit <- xgb.train(
   data = dtrain,
   nrounds = 2000,
   watchlist = list(train = dtrain, test = dtest),
-  objective = "binary:logistic",
+  objective = "reg:logistic",   # regression → output in [0,1]
   monotone_constraints = mono_constraints,
-  eval_metric = "logloss",
-  max_depth = 3,
-  eta = 0.03,
-  subsample = 0.7,
-  colsample_bytree = 0.7,
-  min_child_weight = 50,
-  gamma = 1,
+  eval_metric = "rmse",
+  max_depth = 6,
+  eta = 0.167,
+  subsample = 0.572,
+  colsample_bytree = 0.896,
+  min_child_weight = 10,
+  gamma = 3.92,
   early_stopping_rounds = 30
 )
 
-xgb_prob <- predict(xgb_fit, dtest)
+xgb_pred <- predict(xgb_fit, dtest)
 
 
 # Model Performance
@@ -367,9 +365,9 @@ rmse <- function(y, p) sqrt(mean((y - p)^2))
 y_true <- as.numeric(as.character(test_data$Win))
 
 # Compute RMSE
-rf_rmse <- rmse(y_true, rf_prob)
-logit_rmse <- rmse(y_true, logit_prob)
-xgb_rmse <- rmse(y_true, xgb_prob)
+rf_rmse <- rmse(y_true, rf_pred)
+logit_rmse <- rmse(y_true, logit_pred)
+xgb_rmse <- rmse(y_true, xgb_pred)
 
 results <- tibble(
   Model = c("Logistic", "Random Forest", "XGBoost"),
@@ -705,4 +703,9 @@ for (name in names(pd_list_xgb)) {
     p, width = 7, height = 5, dpi = 300
   )
 }
+
+
+
+
+
 
