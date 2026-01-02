@@ -131,34 +131,6 @@ phase_data <- phase_data %>%
     Card_Diff = (Yellow_Cards_Opp + Red_Cards_Opp) - (Yellow_Cards_Own + Red_Cards_Own)
   )
 
-# Seconds remaining in half
-phase_data <- phase_data %>%
-  mutate(
-    Seconds_Remaining_Half = if_else(
-      Seconds_Remaining > 2400,             # first half
-      Seconds_Remaining - 2400,             # seconds remaining in first half
-      Seconds_Remaining                     # second half: already less than 2400
-    )
-  )
-
-
-
-# Adding final game state if not present
-
-if(nrow(games_missing_final) > 0) {
-  phase_data <- phase_data %>%
-    filter(Seconds_Remaining > 0) %>%
-    group_by(Home, Away, Round) %>%
-    slice_tail(n = 1) %>%
-    mutate(Seconds_Remaining = 0, first_phase = 1) %>%
-    bind_rows(phase_data, .) %>%
-    arrange(Team_for_join, Round, desc(Seconds_Remaining))
-}
-
-phase_data %>%
-  group_by(Home, Away, Round) %>%
-  summarise(has_final = any(Seconds_Remaining == 0), n_rows = n(), .groups = "drop")
-
 
 # First phase or open play
 
@@ -267,7 +239,6 @@ predictors <- c(
   "meter_line_Team",
   "Points_Diff_Team",
   "Seconds_Remaining",
-  "WinPct_Diff_Team",
   "Card_Diff_Team",
   "Possession",
   "adjusted_diff",
@@ -276,8 +247,14 @@ predictors <- c(
 
 # Converting categorical variables to factors and making sure Win is numeric
 
+# Splitting data
+
+phase_team <- phase_team %>%
+  mutate(game_id = paste(Round, Home, Away, sep = "_"))
+
 wp_model <- phase_team %>%
-  select(Win, Round, all_of(predictors)) %>%
+  arrange(ID) %>%
+  select(game_id, Win, Round, all_of(predictors)) %>%
   mutate(
     Win = as.numeric(as.character(Win)),
     across(where(is.character), as.factor)
@@ -288,14 +265,21 @@ wp_model <- phase_team %>%
 
 set.seed(3)
 
-# Splitting and shuffling data
-wp_shuffled <- wp_model %>%
-  dplyr::select(-Round) %>%
-  dplyr::slice_sample(prop = 1)
+# Splitting data
 
-n_train <- floor(0.8 * nrow(wp_shuffled))
-train_data <- wp_shuffled[1:n_train, ]
-test_data  <- wp_shuffled[(n_train + 1):nrow(wp_shuffled), ]
+game_ids <- wp_model %>%
+  distinct(game_id)
+
+train_games <- game_ids %>%
+  slice_sample(prop = 0.8)
+
+train_data <- wp_model %>%
+  semi_join(train_games, by = "game_id") %>%
+  select(-game_id, -Round)
+
+test_data <- wp_model %>%
+  anti_join(train_games, by = "game_id") %>%
+  select(-game_id, -Round)
 
 # Random Forest
 
@@ -372,11 +356,8 @@ mono_constraints <- rep(0, ncol(X_train))
 names(mono_constraints) <- colnames(X_train)
 
 mono_constraints["Points_Diff_Team"] <- 1
-mono_constraints["WinPct_Diff_Team"] <- 1
 mono_constraints["Card_Diff_Team"]   <- 1
-mono_constraints["Possession"]       <- 1
 mono_constraints["adjusted_diff"]    <- 1
-mono_constraints["meter_line_Team"]  <- -1
 
 xgb_fit <- xgb.train(
   data = dtrain,
@@ -397,13 +378,13 @@ xgb_pred <- predict(xgb_fit, dtest)
 
 # Model Performance
 
-table(y_true) / length(y_true)
+table(y_test) / length(y_test)
 
 # Reduction in Error
 library(scales)
 # Baselines
-naive_rmse <- sqrt(mean((y_true - 0.5)^2))        # Always predict draw
-prop_rmse <- sqrt(mean((y_true - mean(y_true))^2)) # Predict average outcome
+naive_rmse <- sqrt(mean((y_test - 0.5)^2))        # Always predict draw
+prop_rmse <- sqrt(mean((y_test - mean(y_test))^2)) # Predict average outcome
 
 # Error Reduction
 rf_reduction_naive <- (naive_rmse - rf_rmse) / naive_rmse * 100
@@ -423,29 +404,27 @@ error_reduction
 
 rmse <- function(y, p) sqrt(mean((y - p)^2))
 
-y_true <- as.numeric(as.character(test_data$Win))
-
 # Compute RMSE
-rf_rmse <- rmse(y_true, rf_pred)
-logit_rmse <- rmse(y_true, logit_pred)
-xgb_rmse <- rmse(y_true, xgb_pred)
+rf_rmse <- rmse(y_test, rf_pred)
+logit_rmse <- rmse(y_test, logit_pred)
+xgb_rmse <- rmse(y_test, xgb_pred)
 
 # Log-loss
 
-log_loss_3way <- function(y_true, p_pred, eps = 1e-15) {
+log_loss_3way <- function(y_test, p_pred, eps = 1e-15) {
   p_pred <- pmax(pmin(p_pred, 1 - eps), eps)
   -mean(
     case_when(
-      y_true == 1 ~ log(p_pred),
-      y_true == 0 ~ log(1 - p_pred),
-      y_true == 0.5 ~ 0.5 * log(p_pred) + 0.5 * log(1 - p_pred)  # Draw hedge
+      y_test == 1 ~ log(p_pred),
+      y_test == 0 ~ log(1 - p_pred),
+      y_test == 0.5 ~ 0.5 * log(p_pred) + 0.5 * log(1 - p_pred)  # Draw hedge
     )
   )
 }
 
-rf_logloss <- log_loss_3way(y_true, rf_pred)
-logit_logloss <- log_loss_3way(y_true, logit_pred)
-xgb_logloss <- log_loss_3way(y_true, xgb_pred)
+rf_logloss <- log_loss_3way(y_test, rf_pred)
+logit_logloss <- log_loss_3way(y_test, logit_pred)
+xgb_logloss <- log_loss_3way(y_test, xgb_pred)
 
 results <- tibble(
   Model = c("Logistic", "Random Forest", "XGBoost"),
@@ -557,7 +536,7 @@ example_game <- phase_team %>%
     Round == 22,
     Home == "Exeter",
     Away == "Northampton",
-    Home_Attack == 1,
+#    Home_Attack == 1,
     Team == "Home"
   )
 
@@ -743,7 +722,6 @@ partial_rf_seconds_by_score <- function(
 pd_list <- list(
   "Field_Position"     = partial_rf("meter_line_Team"),
   "Points_Differential"= partial_rf("Points_Diff_Team"),
-  "Team_Strength"      = partial_rf("WinPct_Diff_Team"),
   "Card_Differential"  = partial_rf("Card_Diff_Team"),
   "total_points_both"  = partial_rf("total_points_both")
 )
@@ -878,7 +856,6 @@ partial_xgb_seconds_by_score <- function(
 pd_list_xgb <- list(
   "Field_Position"      = partial_xgb("meter_line_Team"),
   "Points_Differential" = partial_xgb("Points_Diff_Team"),
-  "Team_Strength"       = partial_xgb("WinPct_Diff_Team"),
   "Card_Differential"   = partial_xgb("Card_Diff_Team"),
   "total_points_both"   = partial_xgb("total_points_both")
 )
