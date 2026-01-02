@@ -28,6 +28,18 @@ phase_data <- phase_data %>%
     points = ifelse(is.na(points), 0, points)
   )
 
+# Finding total points
+
+phase_data <- phase_data %>%
+  group_by(Round, Home, Away) %>%
+  mutate(
+    prev_diff = lag(Points_Difference, default = first(Points_Difference)),  # First row: no change
+    scoring_event = abs(Points_Difference) != abs(prev_diff) & row_number() > 1,  # Skip first
+    points_change = if_else(scoring_event, abs(lag(points)), 0),
+    total_points_both = cumsum(points_change)
+  ) %>%
+  ungroup()
+
 # Getting final score of the match
 last_play <- phase_data %>%
   group_by(Round, Home, Away) %>%
@@ -129,6 +141,25 @@ phase_data <- phase_data %>%
     )
   )
 
+
+
+# Adding final game state if not present
+
+if(nrow(games_missing_final) > 0) {
+  phase_data <- phase_data %>%
+    filter(Seconds_Remaining > 0) %>%
+    group_by(Home, Away, Round) %>%
+    slice_tail(n = 1) %>%
+    mutate(Seconds_Remaining = 0, first_phase = 1) %>%
+    bind_rows(phase_data, .) %>%
+    arrange(Team_for_join, Round, desc(Seconds_Remaining))
+}
+
+phase_data %>%
+  group_by(Home, Away, Round) %>%
+  summarise(has_final = any(Seconds_Remaining == 0), n_rows = n(), .groups = "drop")
+
+
 # First phase or open play
 
 phase_data <- phase_data %>%
@@ -138,6 +169,11 @@ phase_data <- phase_data %>%
     1,
     0
     ))
+
+# Filter for first phase
+
+phase_data <- phase_data %>%
+  filter(first_phase == 1)
 
 # Adding meter line of play start
 location_names <- c("5m-Goal (opp)", "22m-5m (opp)", "10m-22m (opp)",
@@ -221,6 +257,7 @@ phase_team <- phase_data %>%
 phase_team <- phase_team %>%
   mutate(adjusted_diff = Points_Diff_Team/((Seconds_Remaining+1)^0.5))
 
+
 ######################
 ### Model Training ###
 ######################
@@ -234,7 +271,8 @@ predictors <- c(
   "Scores_Ahead_Team",
   "Card_Diff_Team",
   "Possession",
-  "adjusted_diff"
+  "adjusted_diff",
+  "total_points_both"
 )
 
 # Converting categorical variables to factors and making sure Win is numeric
@@ -304,7 +342,7 @@ ggsave(
 logit_fit <- glm(
   Win ~ . - Seconds_Remaining,
   data = train_data,
-  family = binomial(link = "logit")
+  family = gaussian()  # Regression for continuous [0,1]
 )
 
 logit_pred <- predict(
