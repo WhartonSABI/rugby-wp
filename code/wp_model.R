@@ -268,7 +268,6 @@ predictors <- c(
   "Points_Diff_Team",
   "Seconds_Remaining",
   "WinPct_Diff_Team",
-  "Scores_Ahead_Team",
   "Card_Diff_Team",
   "Possession",
   "adjusted_diff",
@@ -285,6 +284,9 @@ wp_model <- phase_team %>%
   ) %>%
   na.omit()
 
+# Setting seed
+
+set.seed(3)
 
 # Splitting and shuffling data
 wp_shuffled <- wp_model %>%
@@ -302,7 +304,7 @@ library(randomForest)
 rf_fit <- randomForest(
   Win ~ .,
   data = train_data,
-  ntree = 500,
+  ntree = 250,
   mtry = 3,
   nodesize = 25,
   importance = TRUE
@@ -371,7 +373,6 @@ names(mono_constraints) <- colnames(X_train)
 
 mono_constraints["Points_Diff_Team"] <- 1
 mono_constraints["WinPct_Diff_Team"] <- 1
-mono_constraints["Scores_Ahead_Team"] <- 1
 mono_constraints["Card_Diff_Team"]   <- 1
 mono_constraints["Possession"]       <- 1
 mono_constraints["adjusted_diff"]    <- 1
@@ -396,6 +397,30 @@ xgb_pred <- predict(xgb_fit, dtest)
 
 # Model Performance
 
+table(y_true) / length(y_true)
+
+# Reduction in Error
+library(scales)
+# Baselines
+naive_rmse <- sqrt(mean((y_true - 0.5)^2))        # Always predict draw
+prop_rmse <- sqrt(mean((y_true - mean(y_true))^2)) # Predict average outcome
+
+# Error Reduction
+rf_reduction_naive <- (naive_rmse - rf_rmse) / naive_rmse * 100
+rf_reduction_prop <- (prop_rmse - rf_rmse) / prop_rmse * 100
+
+# Table
+error_reduction <- tibble(
+  Model = c("RF", "Logistic", "XGBoost"),
+  RMSE = c(rf_rmse, logit_rmse, xgb_rmse),
+  vs_Naive_Reduction = percent((naive_rmse - c(rf_rmse, logit_rmse, xgb_rmse)) / naive_rmse),
+  vs_Prop_Reduction = percent((prop_rmse - c(rf_rmse, logit_rmse, xgb_rmse)) / prop_rmse)
+)
+
+error_reduction
+
+# RMSE
+
 rmse <- function(y, p) sqrt(mean((y - p)^2))
 
 y_true <- as.numeric(as.character(test_data$Win))
@@ -405,28 +430,36 @@ rf_rmse <- rmse(y_true, rf_pred)
 logit_rmse <- rmse(y_true, logit_pred)
 xgb_rmse <- rmse(y_true, xgb_pred)
 
+# Log-loss
+
+log_loss_3way <- function(y_true, p_pred, eps = 1e-15) {
+  p_pred <- pmax(pmin(p_pred, 1 - eps), eps)
+  -mean(
+    case_when(
+      y_true == 1 ~ log(p_pred),
+      y_true == 0 ~ log(1 - p_pred),
+      y_true == 0.5 ~ 0.5 * log(p_pred) + 0.5 * log(1 - p_pred)  # Draw hedge
+    )
+  )
+}
+
+rf_logloss <- log_loss_3way(y_true, rf_pred)
+logit_logloss <- log_loss_3way(y_true, logit_pred)
+xgb_logloss <- log_loss_3way(y_true, xgb_pred)
+
 results <- tibble(
   Model = c("Logistic", "Random Forest", "XGBoost"),
-  RMSE  = c(logit_rmse, rf_rmse, xgb_rmse)
+  RMSE = c(logit_rmse, rf_rmse, xgb_rmse),
+  LogLoss = c(logit_logloss, rf_logloss, xgb_logloss)
 )
 
-results
-
+results %>% arrange(LogLoss)
 
 #########################
 ### Model Calibration ###
 #########################
 
 # Calibration (using out-of-sample test data)
-
-# Random Forest - using test predictions already computed
-# rf_prob was already computed on test_data (line 300-304)
-
-# Logistic - using test predictions already computed
-# logit_prob was already computed on logit_test (line 314-316)
-
-# XGBoost - using test predictions already computed
-# xgb_prob was already computed on dtest (line 359)
 
 calibration_df <- function(prob, y, n_bins = 20) {
   tibble(prob = prob, y = y) %>%
@@ -670,7 +703,6 @@ partial_rf <- function(var, grid_length = 50) {
 partial_rf_seconds_by_score <- function(
     seconds_var = "Seconds_Remaining",
     points_var  = "Points_Diff_Team",
-    scores_var  = "Scores_Ahead_Team",
     adj_var     = "adjusted_diff",
     score_vals  = c(-7, 7),
     grid_length = 50
@@ -692,8 +724,6 @@ partial_rf_seconds_by_score <- function(
     # Set score state
     newdata[[points_var]] <- s
     
-    # Derived variables (MUST be consistent)
-    newdata[[scores_var]] <- 2 * as.integer(s > 0) - 1
     newdata[[adj_var]]    <- s / sqrt(grid_vals + 1)
     
     data.frame(
@@ -714,8 +744,8 @@ pd_list <- list(
   "Field_Position"     = partial_rf("meter_line_Team"),
   "Points_Differential"= partial_rf("Points_Diff_Team"),
   "Team_Strength"      = partial_rf("WinPct_Diff_Team"),
-  "Scores_Ahead"       = partial_rf("Scores_Ahead_Team"),
-  "Card_Differential"  = partial_rf("Card_Diff_Team")
+  "Card_Differential"  = partial_rf("Card_Diff_Team"),
+  "total_points_both"  = partial_rf("total_points_both")
 )
 
 pd_seconds <- partial_rf_seconds_by_score()
@@ -795,7 +825,6 @@ partial_xgb <- function(var, grid_length = 50) {
 partial_xgb_seconds_by_score <- function(
     seconds_var = "Seconds_Remaining",
     points_var  = "Points_Diff_Team",
-    scores_var  = "Scores_Ahead_Team",
     adj_var     = "adjusted_diff",
     score_vals  = c(-7, 7),
     grid_length = 50
@@ -818,7 +847,6 @@ partial_xgb_seconds_by_score <- function(
     newdata[[points_var]] <- s
     
     # Derived variables (MUST be consistent)
-    newdata[[scores_var]] <- 2 * as.integer(s > 0) - 1
     newdata[[adj_var]]    <- s / sqrt(grid_vals + 1)
     
     # Build matrix exactly as in training
@@ -851,8 +879,8 @@ pd_list_xgb <- list(
   "Field_Position"      = partial_xgb("meter_line_Team"),
   "Points_Differential" = partial_xgb("Points_Diff_Team"),
   "Team_Strength"       = partial_xgb("WinPct_Diff_Team"),
-  "Scores_Ahead"        = partial_xgb("Scores_Ahead_Team"),
-  "Card_Differential"   = partial_xgb("Card_Diff_Team")
+  "Card_Differential"   = partial_xgb("Card_Diff_Team"),
+  "total_points_both"   = partial_xgb("total_points_both")
 )
 
 pd_seconds_xgb <- partial_xgb_seconds_by_score()
