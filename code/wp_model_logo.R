@@ -280,6 +280,7 @@ xgb_all_predictions <- tibble()
 
 # Initialize storage for variable importance (will average across folds)
 rf_var_imp_list <- list()
+xgb_var_imp_list <- list()
 
 # Leave-One-Game-Out Cross-Validation
 for (i in seq_along(game_ids)) {
@@ -383,6 +384,10 @@ for (i in seq_along(game_ids)) {
   
   xgb_pred <- predict(xgb_fit, dtest)
   
+  # Store variable importance for this fold
+  xgb_var_imp_list[[i]] <- xgb.importance(model = xgb_fit) %>%
+    as.data.frame()
+  
   # Store predictions
   xgb_all_predictions <- bind_rows(
     xgb_all_predictions,
@@ -390,14 +395,11 @@ for (i in seq_along(game_ids)) {
   )
 }
 
-saveRDS(rf_all_predictions, "data/rf_logo_predictions.rds")
-saveRDS(logit_all_predictions, "data/logit_logo_predictions.rds")
-saveRDS(xgb_all_predictions, "data/xgb_logo_predictions.rds")
+# ============================================================
+# POST-PROCESSING: VARIABLE IMPORTANCE
+# ============================================================
 
-# ============================================================
-# POST-PROCESSING: VARIABLE IMPORTANCE (RANDOM FOREST)
-# ============================================================
-# Average variable importance across all folds
+# Average Random Forest variable importance across all folds
 rf_var_imp_avg <- rf_var_imp_list %>%
   bind_rows() %>%
   group_by(Variable) %>%
@@ -407,31 +409,129 @@ rf_var_imp_avg <- rf_var_imp_list %>%
   ) %>%
   arrange(desc(IncNodePurity))
 
-# Create variable importance plot
-var_imp_plot <- ggplot(
+# Average XGBoost variable importance across all folds
+xgb_var_imp_avg <- xgb_var_imp_list %>%
+  bind_rows() %>%
+  group_by(Feature) %>%
+  summarise(
+    Gain = mean(Gain),
+    Cover = mean(Cover),
+    Frequency = mean(Frequency),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Gain))
+
+# Create Random Forest variable importance plot
+var_imp_plot_rf <- ggplot(
   rf_var_imp_avg,
   aes(x = reorder(Variable, IncNodePurity), y = IncNodePurity)
 ) +
-  geom_col(fill = "skyblue") +
+  geom_col(fill = "#2E86AB") +
   coord_flip() +
   labs(
     x = "Variable",
-    y = "Increase in Node Purity (Averaged across LOGO-CV)",
+    y = "Increase in Node Purity (Averaged)",
     title = "Random Forest Variable Importance (LOGO Cross-Validation)"
   ) +
-  theme_minimal()
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12)
+  )
 
 ggsave(
   "plots/rf_variable_importance_logo.png",
-  var_imp_plot,
+  var_imp_plot_rf,
   width = 7,
   height = 5,
   dpi = 300
 )
 
-# ============================================================
+# Create XGBoost variable importance plot (by Gain)
+var_imp_plot_xgb <- ggplot(
+  xgb_var_imp_avg,
+  aes(x = reorder(Feature, Gain), y = Gain)
+) +
+  geom_col(fill = "#A23B72") +
+  coord_flip() +
+  labs(
+    x = "Variable",
+    y = "Average Gain (Averaged)",
+    title = "XGBoost Variable Importance (LOGO Cross-Validation)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12)
+  )
+
+ggsave(
+  "plots/xgb_variable_importance_logo.png",
+  var_imp_plot_xgb,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
+
+# Combined comparison plot
+var_imp_combined <- bind_rows(
+  rf_var_imp_avg %>% 
+    mutate(Model = "Random Forest", 
+           Importance = IncNodePurity / max(IncNodePurity)) %>%  # Normalize
+    select(Variable, Importance, Model),
+  xgb_var_imp_avg %>% 
+    mutate(Model = "XGBoost", 
+           Importance = Gain / max(Gain)) %>%  # Normalize
+    rename(Variable = Feature) %>%
+    select(Variable, Importance, Model)
+)
+
+var_imp_comparison_plot <- ggplot(
+  var_imp_combined,
+  aes(x = reorder(Variable, Importance), y = Importance, fill = Model)
+) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Random Forest" = "#2E86AB", "XGBoost" = "#A23B72")) +
+  labs(
+    x = "Variable",
+    y = "Normalized Importance",
+    title = "Variable Importance Comparison: Random Forest vs XGBoost",
+    subtitle = "Averaged across LOGO cross-validation folds"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    legend.position = "bottom"
+  )
+
+ggsave(
+  "plots/variable_importance_comparison_logo.png",
+  var_imp_comparison_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# Save importance tables
+write.csv(rf_var_imp_avg, "data/rf_variable_importance_logo.csv", row.names = FALSE)
+write.csv(xgb_var_imp_avg, "data/xgb_variable_importance_logo.csv", row.names = FALSE)
+
+cat("\n=== Variable Importance Results ===\n")
+cat("Random Forest - Top 5 Variables:\n")
+print(rf_var_imp_avg %>% head(5))
+
+cat("\nXGBoost - Top 5 Variables (by Gain):\n")
+print(xgb_var_imp_avg %>% head(5))
+
+cat("\n=== Variable importance plots and tables saved ===\n")
+
+saveRDS(rf_all_predictions, "data/rf_logo_predictions.rds")
+saveRDS(logit_all_predictions, "data/logit_logo_predictions.rds")
+saveRDS(xgb_all_predictions, "data/xgb_logo_predictions.rds")
+
+#============================================================
 # RESULTS SUMMARY
-# ============================================================
+#============================================================
 cat("\n=== LOGO Cross-Validation Complete ===\n")
 cat(sprintf("Total games: %d\n", length(game_ids)))
 cat(sprintf("RF predictions: %d rows\n", nrow(rf_all_predictions)))
@@ -1087,7 +1187,8 @@ pd_list <- list(
   "Field_Position"     = partial_rf("meter_line_Team"),
   "Points_Differential"= partial_rf("Points_Diff_Team"),
   "Card_Differential"  = partial_rf("Card_Diff_Team"),
-  "total_points_both"  = partial_rf("total_points_both")
+  "total_points_both"  = partial_rf("total_points_both"),
+  "WinPct_Diff_Team"  = partial_rf("WinPct_Diff_Team")
   
 )
 
@@ -1098,7 +1199,8 @@ pd_list_xgb <- list(
   "Field_Position"      = partial_xgb("meter_line_Team"),
   "Points_Differential" = partial_xgb("Points_Diff_Team"),
   "Card_Differential"   = partial_xgb("Card_Diff_Team"),
-  "total_points_both"   = partial_xgb("total_points_both")
+  "total_points_both"   = partial_xgb("total_points_both"),
+  "WinPct_Diff_Team"  = partial_rf("WinPct_Diff_Team")
 )
 
 pd_seconds_xgb <- partial_xgb_seconds_by_score()
