@@ -242,7 +242,8 @@ predictors <- c(
   "Card_Diff_Team",
   "Possession",
   "adjusted_diff",
-  "total_points_both"
+  "total_points_both",
+  "WinPct_Diff_Team"
 )
 
 # Converting categorical variables to factors and making sure Win is numeric
@@ -363,6 +364,7 @@ for (i in seq_along(game_ids)) {
   mono_constraints["Points_Diff_Team"] <- 1
   mono_constraints["Card_Diff_Team"]   <- 1
   mono_constraints["adjusted_diff"]    <- 1
+  mono_constraints["WinPct_Diff_Team"]    <- 1
   
   xgb_fit <- xgb.train(
     data = dtrain,
@@ -457,38 +459,35 @@ table(y_test) / length(y_test)
 # RMSE function
 rmse <- function(y, p) sqrt(mean((y - p)^2))
 
+# MSE function
+mse <- function(y, p) mean((y - p)^2)
+
 # Compute RMSE for each model
 rf_rmse <- rmse(y_test, rf_pred)
 logit_rmse <- rmse(y_test, logit_pred)
 xgb_rmse <- rmse(y_test, xgb_pred)
 
-# Log-loss function
-log_loss_3way <- function(y_test, p_pred, eps = 1e-15) {
-  p_pred <- pmax(pmin(p_pred, 1 - eps), eps)
-  -mean(
-    case_when(
-      y_test == 1 ~ log(p_pred),
-      y_test == 0 ~ log(1 - p_pred),
-      y_test == 0.5 ~ 0.5 * log(p_pred) + 0.5 * log(1 - p_pred)  # Draw hedge
-    )
-  )
-}
-
-# Compute log-loss for each model
-rf_logloss <- log_loss_3way(y_test, rf_pred)
-logit_logloss <- log_loss_3way(y_test, logit_pred)
-xgb_logloss <- log_loss_3way(y_test, xgb_pred)
+# Compute MSE for each model
+rf_mse <- mse(y_test, rf_pred)
+logit_mse <- mse(y_test, logit_pred)
+xgb_mse <- mse(y_test, xgb_pred)
 
 # Baselines for error reduction
-naive_rmse <- sqrt(mean((y_test - 0.5)^2))        # Always predict draw
-prop_rmse <- sqrt(mean((y_test - mean(y_test))^2)) # Predict average outcome
+naive_rmse <- sqrt(mean((y_test - 0.5)^2))        
+prop_rmse <- sqrt(mean((y_test - mean(y_test))^2)) 
+
+naive_mse <- mean((y_test - 0.5)^2)        
+prop_mse <- mean((y_test - mean(y_test))^2)
 
 # Error reduction table
 error_reduction <- tibble(
   Model = c("Logistic", "Random Forest", "XGBoost"),
   RMSE = c(logit_rmse, rf_rmse, xgb_rmse),
-  vs_Naive_Reduction = percent((naive_rmse - c(logit_rmse, rf_rmse, xgb_rmse)) / naive_rmse),
-  vs_Prop_Reduction = percent((prop_rmse - c(logit_rmse, rf_rmse, xgb_rmse)) / prop_rmse)
+  MSE = c(logit_mse, rf_mse, xgb_mse),
+  RMSE_vs_Naive = percent((naive_rmse - c(logit_rmse, rf_rmse, xgb_rmse)) / naive_rmse),
+  MSE_vs_Naive = percent((naive_mse - c(logit_mse, rf_mse, xgb_mse)) / naive_mse),
+  RMSE_vs_Prop = percent((prop_rmse - c(logit_rmse, rf_rmse, xgb_rmse)) / prop_rmse),
+  MSE_vs_Prop = percent((prop_mse - c(logit_mse, rf_mse, xgb_mse)) / prop_mse)
 )
 
 print("=== Error Reduction vs Baselines ===")
@@ -498,11 +497,16 @@ print(error_reduction)
 results <- tibble(
   Model = c("Logistic", "Random Forest", "XGBoost"),
   RMSE = c(logit_rmse, rf_rmse, xgb_rmse),
+  MSE = c(logit_mse, rf_mse, xgb_mse),
   LogLoss = c(logit_logloss, rf_logloss, xgb_logloss)
 )
 
 print("=== Model Performance (LOGO CV) ===")
 print(results %>% arrange(LogLoss))
+
+# Save results
+write.csv(error_reduction, "data/logo_error_reduction.csv", row.names = FALSE)
+write.csv(results, "data/logo_model_performance.csv", row.names = FALSE)
 
 #########################
 ### Model Calibration ###
@@ -686,6 +690,7 @@ names(mono_constraints) <- colnames(X_train_holdout)
 mono_constraints["Points_Diff_Team"] <- 1
 mono_constraints["Card_Diff_Team"]   <- 1
 mono_constraints["adjusted_diff"]    <- 1
+mono_constraints["WinPct_Diff_Team"] <- 1
 
 xgb_fit_holdout <- xgb.train(
   data = dtrain_holdout,
@@ -746,6 +751,10 @@ example_game$Win_Prob_Logit <- predict(
   newdata = example_game,
   type = "response"
 )
+
+################################################
+### Logistic Regression Coefficients Summary ###
+################################################
 
 # ============================================================
 # XGBOOST PREDICTIONS
@@ -888,6 +897,7 @@ names(mono_constraints) <- colnames(X_train)
 mono_constraints["Points_Diff_Team"] <- 1
 mono_constraints["Card_Diff_Team"]   <- 1
 mono_constraints["adjusted_diff"]    <- 1
+mono_constraints["WinPct_Diff_Team"] <- 1
 
 xgb_fit <- xgb.train(
   data = dtrain,
@@ -1078,6 +1088,7 @@ pd_list <- list(
   "Points_Differential"= partial_rf("Points_Diff_Team"),
   "Card_Differential"  = partial_rf("Card_Diff_Team"),
   "total_points_both"  = partial_rf("total_points_both")
+  
 )
 
 pd_seconds <- partial_rf_seconds_by_score()
