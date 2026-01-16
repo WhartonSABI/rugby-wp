@@ -835,30 +835,23 @@ example_game <- example_game %>%
     )
   )
 
-# ============================================================
-# RANDOM FOREST PREDICTIONS
-# ============================================================
+# Random forest predictions
+
 example_game$Win_Prob_RF <- predict(
   rf_fit_holdout,
   newdata = example_game
 )
 
-# ============================================================
-# LOGISTIC REGRESSION PREDICTIONS
-# ============================================================
+# Logistic regression predictions
+
 example_game$Win_Prob_Logit <- predict(
   logit_fit_holdout,
   newdata = example_game,
   type = "response"
 )
 
-################################################
-### Logistic Regression Coefficients Summary ###
-################################################
+# XGBOOST predictions
 
-# ============================================================
-# XGBOOST PREDICTIONS
-# ============================================================
 # Create model matrix for XGBoost
 X_example <- model.matrix(
   ~ . - 1,
@@ -872,9 +865,7 @@ example_game$Win_Prob_XGB <- predict(
   xgb_matrix_example
 )
 
-# ============================================================
-# PREPARE DATA FOR PLOTTING
-# ============================================================
+# Preparing data for plotting
 
 # Reshape to long format
 example_long <- example_game %>%
@@ -906,10 +897,6 @@ score_changes <- example_game %>%
   ) %>%
   filter(score_change) %>%
   select(Seconds_Remaining, Points_Diff_Team)
-
-# ============================================================
-# CREATE AND SAVE PLOT
-# ============================================================
 
 example_plot <- ggplot(
   example_long,
@@ -956,24 +943,18 @@ ggsave(
 cat("Example game plot saved to plots/example_game_plot.png\n")
 
 
-######################
+#########################################################
 ### Load LOGO Predictions & Prepare for Partial Plots ###
-######################
-
-# We'll use the first game as holdout and train on the rest for partial plots
-# (or you could train on all data since LOGO CV validation is complete)
-
-# For interpretability, let's train on ALL data for partial plots
-# (these are for understanding relationships, not prediction validation)
+#########################################################
 
 train_data_full <- wp_model %>%
   select(-game_id, -Round)
 
 predictors <- setdiff(names(train_data_full), "Win")
 
-######################
+###################################################
 ### Train Models on Full Data for Partial Plots ###
-######################
+###################################################
 
 cat("Training models on full data for partial dependence plots...\n")
 
@@ -1013,9 +994,9 @@ xgb_fit <- xgb.train(
 
 cat("Models trained!\n\n")
 
-######################
+#######################
 ### Baseline Values ###
-######################
+#######################
 
 baseline <- train_data_full %>%
   summarise(
@@ -1027,9 +1008,9 @@ baseline <- train_data_full %>%
     )
   )
 
-######################
+##################################################
 ### Random Forest Partial Dependence Functions ###
-######################
+##################################################
 
 partial_rf <- function(var, grid_length = 50) {
   
@@ -1093,9 +1074,9 @@ partial_rf_seconds_by_score <- function(
   dplyr::bind_rows(pd_list)
 }
 
-######################
+############################################
 ### XGBoost Partial Dependence Functions ###
-######################
+############################################
 
 partial_xgb <- function(var, grid_length = 50) {
   
@@ -1205,9 +1186,9 @@ pd_list_xgb <- list(
 
 pd_seconds_xgb <- partial_xgb_seconds_by_score()
 
-######################
+###########################################
 ### Create and Save Random Forest Plots ###
-######################
+###########################################
 
 for (name in names(pd_list)) {
   
@@ -1327,9 +1308,9 @@ ggsave(
   dpi = 300
 )
 
-######################
+#################################
 ### Combined Comparison Plots ###
-######################
+#################################
 
 # Combine RF and XGBoost for comparison
 pd_combined <- bind_rows(
