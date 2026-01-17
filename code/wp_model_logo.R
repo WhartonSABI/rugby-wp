@@ -7,6 +7,8 @@ library(Matrix)
 library(randomForest)
 library(tidyr)
 library(isotone)
+library(scales)
+
 
 # setwd("/Users/kennywatts/Documents/Github/Rugby_wp")
 
@@ -593,6 +595,18 @@ error_reduction <- tibble(
 print("=== Error Reduction vs Baselines ===")
 print(error_reduction)
 
+# Log Loss function
+logloss <- function(y, p) {
+  # Clip predictions to avoid log(0)
+  p <- pmax(pmin(p, 1 - 1e-15), 1e-15)
+  -mean(y * log(p) + (1 - y) * log(1 - p))
+}
+
+# Compute Log Loss for each model
+logit_logloss <- logloss(y_test, logit_pred)
+rf_logloss <- logloss(y_test, rf_pred)
+xgb_logloss <- logloss(y_test, xgb_pred)
+
 # Combined results table
 results <- tibble(
   Model = c("Logistic", "Random Forest", "XGBoost"),
@@ -725,6 +739,69 @@ cat("\n=== All results saved ===\n")
 cat("Performance metrics: data/logo_model_performance.csv\n")
 cat("Calibration plots: plots/calibration_*_logo.png\n")
 
+########################
+### Isotonic Mapping ###
+########################
+
+# Function to apply isotonic calibration
+apply_isotonic <- function(raw_preds, iso_model) {
+  # Sort by x values to ensure increasing order
+  ord <- order(iso_model$x)
+  x_sorted <- iso_model$x[ord]
+  y_sorted <- iso_model$yf[ord]
+  
+  # Create step function with sorted values
+  calib_fn <- stepfun(x_sorted, c(y_sorted[1], y_sorted))
+  calibrated <- calib_fn(raw_preds)
+  
+  # Clip to [0, 1]
+  pmin(pmax(calibrated, 0), 1)
+}
+
+# Split test set into calibration (50%) and evaluation (50%)
+n_test <- length(y_test)
+cal_idx <- sample(1:n_test, size = floor(n_test * 0.5))
+eval_idx <- setdiff(1:n_test, cal_idx)
+
+# Fit isotonic on calibration subset
+iso_logit <- isoreg(logit_pred[cal_idx], y_test[cal_idx])
+iso_rf <- isoreg(rf_pred[cal_idx], y_test[cal_idx])
+iso_xgb <- isoreg(xgb_pred[cal_idx], y_test[cal_idx])
+
+# Apply to evaluation subset
+logit_pred_cal <- apply_isotonic(logit_pred[eval_idx], iso_logit)
+rf_pred_cal <- apply_isotonic(rf_pred[eval_idx], iso_rf)
+xgb_pred_cal <- apply_isotonic(xgb_pred[eval_idx], iso_xgb)
+
+# Calibration tables on evaluation subset only
+cal_logit <- calibration_df(logit_pred[eval_idx], y_test[eval_idx])
+cal_rf <- calibration_df(rf_pred[eval_idx], y_test[eval_idx])
+cal_xgb <- calibration_df(xgb_pred[eval_idx], y_test[eval_idx])
+
+cal_logit_iso <- calibration_df(logit_pred_cal, y_test[eval_idx])
+cal_rf_iso <- calibration_df(rf_pred_cal, y_test[eval_idx])
+cal_xgb_iso <- calibration_df(xgb_pred_cal, y_test[eval_idx])
+
+# Now plot
+bind_rows(
+  cal_xgb %>% mutate(model = "Original"),
+  cal_xgb_iso %>% mutate(model = "Isotonic Calibrated")
+) %>%
+  ggplot(aes(x = mean_pred, y = win_rate, color = model)) +
+  geom_point(aes(size = n), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    x = "Mean Predicted Probability",
+    y = "Observed Win Rate",
+    title = "XGBoost Calibration: Original vs Isotonic (Evaluation Set)"
+  ) +
+  theme_minimal()
+
+# This is wrong currently
+
+
+
+
 ######################
 ### Game example #####
 ######################
@@ -741,9 +818,9 @@ example_game_id <- phase_team %>%
 
 cat(sprintf("Example game ID: %s\n", example_game_id))
 
-######################
+####################################################
 ### Train Models on All Data EXCEPT Example Game ###
-######################
+####################################################
 
 cat("Training models on all data except example game...\n")
 
@@ -755,9 +832,8 @@ train_data_holdout <- wp_model %>%
 # Get predictor names (excluding Win)
 predictors <- setdiff(names(train_data_holdout), "Win")
 
-# ============================================================
 # 1. RANDOM FOREST (Holdout Training)
-# ============================================================
+
 rf_fit_holdout <- randomForest(
   Win ~ .,
   data = train_data_holdout,
@@ -767,18 +843,16 @@ rf_fit_holdout <- randomForest(
   importance = TRUE
 )
 
-# ============================================================
 # 2. LOGISTIC REGRESSION (Holdout Training)
-# ============================================================
+
 logit_fit_holdout <- glm(
   Win ~ . - Seconds_Remaining,
   data = train_data_holdout,
   family = gaussian()
 )
 
-# ============================================================
 # 3. XGBOOST (Holdout Training)
-# ============================================================
+
 X_train_holdout <- model.matrix(Win ~ . - 1, data = train_data_holdout)
 y_train_holdout <- train_data_holdout$Win
 
