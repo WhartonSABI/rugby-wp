@@ -173,7 +173,7 @@ phase_data$time_state <- cut(phase_data$Seconds_Remaining,
 phase_data$state <- paste(phase_data$time_state, phase_data$meter_line, sep = "_")
 
 # Calculate expected points for each state
-ep_model <- aggregate(points ~ state, data = phase_data, FUN = mean)
+ep_model <- aggregate(points_change ~ state, data = phase_data, FUN = mean)
 names(ep_model)[2] <- "expected_points"
 
 # Merge expected points back to original data
@@ -221,20 +221,24 @@ phase_data$next_team <- ave(phase_data$Team_In_Poss, phase_data$game_id,
 phase_data$next_state_result <- ave(phase_data$state, phase_data$game_id, 
                                     FUN = function(x) c(as.character(x[-1]), NA))
 
-# 4. Determine the result of current state
-phase_data$state_result <- ifelse(phase_data$points_change > 0, 
-                                  paste0("Score_", phase_data$points_change),
+phase_data$next_points_change <- ave(phase_data$points_change, phase_data$game_id,
+                                     FUN = function(x) c(x[-1], NA))
+
+# Determine the result of current state using NEXT row's points_change
+phase_data$state_result <- ifelse(!is.na(phase_data$next_points_change) & phase_data$next_points_change > 0, 
+                                  paste0("Score_", phase_data$next_points_change),
                                   ifelse(phase_data$Team_In_Poss != phase_data$next_team & !is.na(phase_data$next_team),
                                          "Possession_Change",
                                          ifelse(phase_data$state != phase_data$next_state_result & !is.na(phase_data$next_state_result),
                                                 phase_data$next_state_result,
-                                                ifelse(is.na(phase_data$next_team) & phase_data$points_change == 0,
+                                                ifelse(is.na(phase_data$next_team),
                                                        "End_of_Game",
                                                        phase_data$next_state_result))))
 
 # View the results
 table(phase_data$state_result)
-head(phase_data[, c("state", "points", "Team_In_Poss", "next_team", "state_result")], 20)
+head(phase_data[, c("state", "points_change", "next_points_change", "Team_In_Poss", "next_team", "state_result")], 30)
+
 
 #####################################
 ### Transition Probability Matrix ###
@@ -242,20 +246,18 @@ head(phase_data[, c("state", "points", "Team_In_Poss", "next_team", "state_resul
 
 transition_matrix <- prop.table(table(phase_data$state, phase_data$state_result), margin = 1)
 
-# Inspecting Matrix
-
-# Convert to data frame for easier viewing
+# Convert to data frame
 transition_df <- as.data.frame.table(transition_matrix)
 names(transition_df) <- c("from_state", "to_result", "probability")
-transition_df <- transition_df[transition_df$probability > 0, ]  # Remove zeros
+transition_df <- transition_df[transition_df$probability > 0, ]
 transition_df <- transition_df[order(transition_df$from_state, -transition_df$probability), ]
 
-# View top transitions from a specific state
+# View transitions from a specific state
 view_state_transitions <- function(state, transition_df) {
   subset(transition_df, from_state == state)
 }
 
-# Example: See all transitions from state "5_45"
+cat("\n=== Example transitions from state 5_45 ===\n")
 print(view_state_transitions("5_45", transition_df))
 
 # Summary statistics by state
@@ -268,13 +270,10 @@ poss_change_summary <- aggregate(probability ~ from_state,
                                  FUN = sum)
 names(poss_change_summary)[2] <- "prob_poss_change"
 
-# Merge the two summaries
 state_summary <- merge(state_summary, poss_change_summary, by = "from_state", all = TRUE)
-
-# Replace NAs with 0 (states with no scoring or no possession changes)
 state_summary[is.na(state_summary)] <- 0
 
-# Add expected points when scoring
+# Expected points when scoring
 scoring_trans <- transition_df[grepl("^Score_", transition_df$to_result), ]
 scoring_trans$points_scored <- as.numeric(sub("Score_", "", scoring_trans$to_result))
 scoring_trans$exp_pts <- scoring_trans$probability * scoring_trans$points_scored
@@ -285,9 +284,10 @@ names(exp_pts_by_state)[2] <- "exp_points_from_state"
 state_summary <- merge(state_summary, exp_pts_by_state, by = "from_state", all.x = TRUE)
 state_summary[is.na(state_summary)] <- 0
 
-print(state_summary)
+cat("\n=== State Summary (Corrected) ===\n")
+print(head(state_summary, 20))
 
-# Heatmap of scoring probability by state
+# Heatmap of scoring probability
 library(ggplot2)
 scoring_by_state <- transition_df[grepl("^Score_", transition_df$to_result), ]
 scoring_by_state$time_state <- sub("_.*", "", scoring_by_state$from_state)
@@ -296,13 +296,19 @@ scoring_by_state$meter_line <- sub(".*_", "", scoring_by_state$from_state)
 score_agg <- aggregate(probability ~ time_state + meter_line, 
                        data = scoring_by_state, FUN = sum)
 
+score_agg$meter_line <- factor(score_agg$meter_line, 
+                               levels = as.character(sort(unique(as.numeric(score_agg$meter_line)), 
+                                                          decreasing = TRUE)))
+
 ggplot(score_agg, aes(x = time_state, y = meter_line, fill = probability)) +
   geom_tile(color = "white") +
   geom_text(aes(label = round(probability, 2)), size = 3) +
   scale_fill_gradient(low = "white", high = "darkred") +
-  labs(title = "Probability of Scoring by State") +
+  labs(title = "Probability of Scoring by State",
+       subtitle = "Using next_points_change for accurate scoring attribution",
+       x = "Time State",
+       y = "Meter Line") +
   theme_minimal()
-
 
 ###########################
 ### Simulation function ###
@@ -381,18 +387,153 @@ simulate_game <- function(start_state, score_home, score_away, team_poss,
 }
 
 # Example usage:
-# Starting at state "5_45", Home team has ball, score is Home 14 - Away 10
-result <- simulate_game(start_state = "5_45", 
-                        score_home = 14, 
-                        score_away = 10, 
+
+result <- simulate_game(start_state = "1_2.5", 
+                        score_home = 21, 
+                        score_away = 3, 
                         team_poss = "Home",
                         transition_matrix = transition_matrix,
                         n_sims = 1000)
 
 print(result)
 
+# Calibrating Model
 
+# Sample game states and prepare for simulation
+prepare_calibration_data <- function(phase_data, n_samples = 2000) {
+  
+  # Remove end-of-game states
+  phase_data <- phase_data[phase_data$state_result != "End_of_Game", ]
+  
+  # Sample random states
+  set.seed(123)
+  sample_indices <- sample(1:nrow(phase_data), min(n_samples, nrow(phase_data)))
+  sampled_states <- phase_data[sample_indices, ]
+  
+  # Calculate home and away scores at this moment
+  sampled_states$home_score <- ifelse(sampled_states$Team_In_Poss == "Home",
+                                      (sampled_states$total_points_both + sampled_states$Points_Difference) / 2,
+                                      (sampled_states$total_points_both - sampled_states$Points_Difference) / 2)
+  
+  sampled_states$away_score <- sampled_states$total_points_both - sampled_states$home_score
+  
+  # Determine team_poss parameter ("Home" or "Away")
+  sampled_states$team_poss <- ifelse(sampled_states$Team_In_Poss == "Home",
+                                     "Home", "Away")
+  
+  # Determine if possession team won (for calibration)
+  sampled_states$poss_team_won <- sampled_states$Win
+  
+  return(sampled_states)
+}
 
+calibration_data <- prepare_calibration_data(phase_data, n_samples = 2000)
+
+# Verify the data looks correct
+cat("=== Sample of Calibration Data ===\n")
+print(head(calibration_data[, c("state", "home_score", "away_score", "team_poss", "poss_team_won")], 10))
+
+# Run simulations for all sampled states
+
+run_calibration_sims <- function(calibration_data, transition_matrix, n_sims = 100) {
+  
+  results <- data.frame(
+    state = character(),
+    actual_win = numeric(),
+    predicted_win_prob = numeric(),
+    home_score = numeric(),
+    away_score = numeric(),
+    time_state = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (i in 1:nrow(calibration_data)) {
+    
+    if (i %% 50 == 0) cat("Processing state", i, "of", nrow(calibration_data), "\n")
+    
+    row <- calibration_data[i, ]
+    
+    # Run simulation
+    sim_result <- simulate_game(
+      start_state = row$state,
+      score_home = row$home_score,
+      score_away = row$away_score,
+      team_poss = row$team_poss,
+      transition_matrix = transition_matrix,
+      n_sims = n_sims
+    )
+    
+    # Determine predicted win prob for possession team
+    if (row$team_poss == "Home") {
+      pred_win_prob <- sim_result$home_win_prob
+    } else {
+      pred_win_prob <- sim_result$away_win_prob
+    }
+    
+    # Store results
+    results <- rbind(results, data.frame(
+      state = row$state,
+      actual_win = row$poss_team_won,
+      predicted_win_prob = pred_win_prob,
+      home_score = row$home_score,
+      away_score = row$away_score,
+      time_state = sub("_.*", "", row$state),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  return(results)
+}
+
+calibration_results <- run_calibration_sims(calibration_data, transition_matrix, n_sims = 100)
+
+# Calibration plot
+library(ggplot2)
+
+plot_calibration <- function(calibration_results) {
+  
+  # Bin predictions
+  calibration_results$pred_bin_num <- cut(calibration_results$predicted_win_prob,
+                                          breaks = seq(0, 1, 0.1),
+                                          include.lowest = TRUE)
+  
+  bin_summary <- aggregate(cbind(actual_win, predicted_win_prob) ~ pred_bin_num,
+                           data = calibration_results,
+                           FUN = function(x) c(mean = mean(x), n = length(x)))
+  
+  bin_summary$pred_mean <- bin_summary$predicted_win_prob[, 1]
+  bin_summary$actual_mean <- bin_summary$actual_win[, 1]
+  bin_summary$n <- bin_summary$actual_win[, 2]
+  
+  # Calibration curve
+  p1 <- ggplot(bin_summary, aes(x = pred_mean, y = actual_mean)) +
+    geom_point(aes(size = n), alpha = 0.6) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+    geom_smooth(method = "loess", se = TRUE, color = "blue") +
+    labs(title = "Calibration Curve",
+         subtitle = "Perfect calibration = points on diagonal line",
+         x = "Predicted Win Probability",
+         y = "Actual Win Rate",
+         size = "N") +
+    xlim(0, 1) + ylim(0, 1) +
+    theme_minimal()
+  
+  # Distribution of predictions
+  p2 <- ggplot(calibration_results, aes(x = predicted_win_prob, fill = factor(actual_win))) +
+    geom_histogram(bins = 20, alpha = 0.6, position = "identity") +
+    labs(title = "Distribution of Predictions",
+         x = "Predicted Win Probability",
+         y = "Count",
+         fill = "Actual Win") +
+    theme_minimal()
+  
+  print(p1)
+  print(p2)
+  
+  return(list(calibration = p1, distribution = p2))
+}
+
+plots <- plot_calibration(calibration_results)
 
 
 
