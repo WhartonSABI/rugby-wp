@@ -206,5 +206,195 @@ ggplot(ep_model, aes(x = time_state, y = meter_line, fill = expected_points)) +
        fill = "Expected\nPoints") +
   theme_minimal()
 
+# Transforming Data to State Appropriate Structure
+
+# 1. Filter for unique games
+unique_games <- unique(phase_data[, c("Home", "Away", "Round")])
+phase_data$game_id <- paste(phase_data$Home, phase_data$Away, phase_data$Round, sep = "_")
+
+# 2. Order by game and time (descending seconds = forward in time)
+phase_data <- phase_data[order(phase_data$game_id, -phase_data$Seconds_Remaining), ]
+
+# 3. Create next row variables within each game
+phase_data$next_team <- ave(phase_data$Team_In_Poss, phase_data$game_id, 
+                            FUN = function(x) c(as.character(x[-1]), NA))
+phase_data$next_state_result <- ave(phase_data$state, phase_data$game_id, 
+                                    FUN = function(x) c(as.character(x[-1]), NA))
+
+# 4. Determine the result of current state
+phase_data$state_result <- ifelse(phase_data$points_change > 0, 
+                                  paste0("Score_", phase_data$points_change),
+                                  ifelse(phase_data$Team_In_Poss != phase_data$next_team & !is.na(phase_data$next_team),
+                                         "Possession_Change",
+                                         ifelse(phase_data$state != phase_data$next_state_result & !is.na(phase_data$next_state_result),
+                                                phase_data$next_state_result,
+                                                ifelse(is.na(phase_data$next_team) & phase_data$points_change == 0,
+                                                       "End_of_Game",
+                                                       phase_data$next_state_result))))
+
+# View the results
+table(phase_data$state_result)
+head(phase_data[, c("state", "points", "Team_In_Poss", "next_team", "state_result")], 20)
+
+#####################################
+### Transition Probability Matrix ###
+#####################################
+
+transition_matrix <- prop.table(table(phase_data$state, phase_data$state_result), margin = 1)
+
+# Inspecting Matrix
+
+# Convert to data frame for easier viewing
+transition_df <- as.data.frame.table(transition_matrix)
+names(transition_df) <- c("from_state", "to_result", "probability")
+transition_df <- transition_df[transition_df$probability > 0, ]  # Remove zeros
+transition_df <- transition_df[order(transition_df$from_state, -transition_df$probability), ]
+
+# View top transitions from a specific state
+view_state_transitions <- function(state, transition_df) {
+  subset(transition_df, from_state == state)
+}
+
+# Example: See all transitions from state "5_45"
+print(view_state_transitions("5_45", transition_df))
+
+# Summary statistics by state
+state_summary <- aggregate(cbind(prob_score = probability) ~ from_state, 
+                           data = transition_df[grepl("^Score_", transition_df$to_result), ],
+                           FUN = sum)
+
+poss_change_summary <- aggregate(probability ~ from_state,
+                                 data = transition_df[transition_df$to_result == "Possession_Change", ],
+                                 FUN = sum)
+names(poss_change_summary)[2] <- "prob_poss_change"
+
+# Merge the two summaries
+state_summary <- merge(state_summary, poss_change_summary, by = "from_state", all = TRUE)
+
+# Replace NAs with 0 (states with no scoring or no possession changes)
+state_summary[is.na(state_summary)] <- 0
+
+# Add expected points when scoring
+scoring_trans <- transition_df[grepl("^Score_", transition_df$to_result), ]
+scoring_trans$points_scored <- as.numeric(sub("Score_", "", scoring_trans$to_result))
+scoring_trans$exp_pts <- scoring_trans$probability * scoring_trans$points_scored
+
+exp_pts_by_state <- aggregate(exp_pts ~ from_state, data = scoring_trans, FUN = sum)
+names(exp_pts_by_state)[2] <- "exp_points_from_state"
+
+state_summary <- merge(state_summary, exp_pts_by_state, by = "from_state", all.x = TRUE)
+state_summary[is.na(state_summary)] <- 0
+
+print(state_summary)
+
+# Heatmap of scoring probability by state
+library(ggplot2)
+scoring_by_state <- transition_df[grepl("^Score_", transition_df$to_result), ]
+scoring_by_state$time_state <- sub("_.*", "", scoring_by_state$from_state)
+scoring_by_state$meter_line <- sub(".*_", "", scoring_by_state$from_state)
+
+score_agg <- aggregate(probability ~ time_state + meter_line, 
+                       data = scoring_by_state, FUN = sum)
+
+ggplot(score_agg, aes(x = time_state, y = meter_line, fill = probability)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(probability, 2)), size = 3) +
+  scale_fill_gradient(low = "white", high = "darkred") +
+  labs(title = "Probability of Scoring by State") +
+  theme_minimal()
+
+
+###########################
+### Simulation function ###
+###########################
+
+
+simulate_game <- function(start_state, score_home, score_away, team_poss, 
+                          transition_matrix, n_sims = 1000) {
+  
+  results <- data.frame(home_wins = 0, away_wins = 0, ties = 0)
+  
+  for (sim in 1:n_sims) {
+    current_state <- start_state
+    current_score_home <- score_home
+    current_score_away <- score_away
+    current_team <- team_poss
+    max_plays <- 200  # Safety limit
+    plays <- 0
+    
+    while (plays < max_plays) {
+      plays <- plays + 1
+      
+      # Get possible transitions from current state
+      if (!current_state %in% rownames(transition_matrix)) {
+        break  # State not in matrix, end simulation
+      }
+      
+      probs <- transition_matrix[current_state, ]
+      probs <- probs[probs > 0]  # Only non-zero probabilities
+      
+      if (length(probs) == 0) break
+      
+      # Sample next event
+      next_event <- sample(names(probs), 1, prob = probs)
+      
+      # Handle the result
+      if (next_event == "End_of_Game") {
+        break
+        
+      } else if (grepl("^Score_", next_event)) {
+        # Extract points scored
+        pts <- as.numeric(sub("Score_", "", next_event))
+        if (current_team == "Home") {
+          current_score_home <- current_score_home + pts
+        } else {
+          current_score_away <- current_score_away + pts
+        }
+        # Possession changes after score
+        current_team <- ifelse(current_team == "Home", "Away", "Home")
+        
+      } else if (next_event == "Possession_Change") {
+        current_team <- ifelse(current_team == "Home", "Away", "Home")
+        
+      } else {
+        # Transition to new state
+        current_state <- next_event
+      }
+    }
+    
+    # Record result
+    if (current_score_home > current_score_away) {
+      results$home_wins <- results$home_wins + 1
+    } else if (current_score_away > current_score_home) {
+      results$away_wins <- results$away_wins + 1
+    } else {
+      results$ties <- results$ties + 1
+    }
+  }
+  
+  # Calculate win probabilities
+  results$home_win_prob <- results$home_wins / n_sims
+  results$away_win_prob <- results$away_wins / n_sims
+  results$tie_prob <- results$ties / n_sims
+  
+  return(results)
+}
+
+# Example usage:
+# Starting at state "5_45", Home team has ball, score is Home 14 - Away 10
+result <- simulate_game(start_state = "5_45", 
+                        score_home = 14, 
+                        score_away = 10, 
+                        team_poss = "Home",
+                        transition_matrix = transition_matrix,
+                        n_sims = 1000)
+
+print(result)
+
+
+
+
+
+
 
 
