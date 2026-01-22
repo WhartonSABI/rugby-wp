@@ -507,9 +507,8 @@ plot_calibration <- function(calibration_results) {
   
   # Calibration curve
   p1 <- ggplot(bin_summary, aes(x = pred_mean, y = actual_mean)) +
-    geom_point(aes(size = n), alpha = 0.6) +
+    geom_point() +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
-    geom_smooth(method = "loess", se = TRUE, color = "blue") +
     labs(title = "Calibration Curve",
          subtitle = "Perfect calibration = points on diagonal line",
          x = "Predicted Win Probability",
