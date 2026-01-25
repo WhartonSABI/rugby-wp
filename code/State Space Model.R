@@ -368,7 +368,7 @@ analyze_next_state_after_score <- function(phase_data) {
 
 score_next_states <- analyze_next_state_after_score(phase_data)
 
-# Looking at possession changes
+# Testing what happens after a possession change
 
 analyze_next_state_after_possession_change <- function(phase_data) {
   
@@ -380,11 +380,12 @@ analyze_next_state_after_possession_change <- function(phase_data) {
   poss_change_indices <- poss_change_indices[valid_next]
   next_indices <- next_indices[valid_next]
   
+  current_states <- phase_data$state[poss_change_indices]
   losing_team <- phase_data$Team_In_Poss[poss_change_indices]
   next_states <- phase_data$state[next_indices]
   next_team_poss <- phase_data$Team_In_Poss[next_indices]
   
-  cat("\n=== NEXT STATE AFTER POSSESSION CHANGE ===\n")
+  cat("\n=== POSSESSION CHANGE: CURRENT vs NEXT STATE ===\n")
   cat("Total possession changes:", length(next_states), "\n\n")
   
   if (length(next_states) == 0) {
@@ -392,63 +393,69 @@ analyze_next_state_after_possession_change <- function(phase_data) {
     return(NULL)
   }
   
-  cat("\n--- FROM TEAM THAT LOST POSSESSION ---\n")
   losing_team_keeps <- losing_team == next_team_poss
-  cat("(Should be ~0 if possession truly changed)\n")
-  cat("Events where losing team keeps ball:", sum(losing_team_keeps), "\n\n")
   
-  cat("\n--- FROM TEAM THAT GAINED POSSESSION ---\n")
-  gaining_team_states <- next_states[!losing_team_keeps]
-  cat("Events where gaining team gets ball:", sum(!losing_team_keeps), "\n")
+  cat("--- TEAM THAT LOST POSSESSION ---\n")
+  cat("State when they lost it -> State from their perspective after:\n")
+  losing_comparison <- data.frame(
+    current_state = current_states[!losing_team_keeps],
+    next_state = next_states[!losing_team_keeps]
+  )
+  if (nrow(losing_comparison) > 0) {
+    losing_table <- table(losing_comparison$current_state, losing_comparison$next_state)
+    print(head(as.data.frame.table(losing_table)[as.data.frame.table(losing_table)$Freq > 0, ], 20))
+  }
   
-  if (sum(!losing_team_keeps) > 0) {
-    gt_probs <- prop.table(table(gaining_team_states))
-    gt_df <- as.data.frame(gt_probs)
-    names(gt_df) <- c("next_state", "probability")
-    gt_df <- gt_df[order(-gt_df$probability), ]
-    print(head(gt_df, 20))
+  cat("\n--- TEAM THAT GAINED POSSESSION ---\n")
+  cat("State when they gained it -> State from their perspective:\n")
+  gaining_comparison <- data.frame(
+    current_state = current_states[!losing_team_keeps],
+    next_state = next_states[!losing_team_keeps]
+  )
+  if (nrow(gaining_comparison) > 0) {
+    gaining_table <- table(gaining_comparison$current_state, gaining_comparison$next_state)
+    print(head(as.data.frame.table(gaining_table)[as.data.frame.table(gaining_table)$Freq > 0, ], 20))
   }
   
   return(list(
-    gaining_team_next = if(sum(!losing_team_keeps) > 0) gt_df else NULL
+    losing_team_transitions = losing_comparison,
+    gaining_team_transitions = gaining_comparison
   ))
 }
 
 poss_next_states <- analyze_next_state_after_possession_change(phase_data)
 
-# Testing what happens after a possession change
+# Build possession change transition matrix
 
-analyze_next_state_after_possession_change <- function(phase_data) {
+build_possession_change_matrix <- function(phase_data) {
   
-  poss_change_rows <- phase_data[phase_data$state_result == "Possession_Change", ]
+  poss_change_indices <- which(phase_data$state_result == "Possession_Change")
+  next_indices <- poss_change_indices + 1
+  valid_next <- next_indices <= nrow(phase_data)
   
-  poss_change_rows$next_state <- c(phase_data$state[match(poss_change_rows$phase_id, phase_data$phase_id[-nrow(phase_data)]) + 1], NA)
+  poss_change_indices <- poss_change_indices[valid_next]
+  next_indices <- next_indices[valid_next]
   
-  poss_change_rows <- poss_change_rows[!is.na(poss_change_rows$next_state), ]
+  current_states <- phase_data$state[poss_change_indices]
+  next_states <- phase_data$state[next_indices]
   
-  cat("\n=== NEXT STATE AFTER POSSESSION CHANGE ===\n")
-  cat("Total possession changes with next state:", nrow(poss_change_rows), "\n\n")
+  poss_change_matrix <- prop.table(table(current_states, next_states), margin = 1)
   
-  next_state_probs <- prop.table(table(poss_change_rows$next_state))
-  next_state_df <- as.data.frame(next_state_probs)
-  names(next_state_df) <- c("next_state", "probability")
-  next_state_df <- next_state_df[order(-next_state_df$probability), ]
-  
-  cat("Top 20 next states after possession change:\n")
-  print(head(next_state_df, 20))
-  
-  return(next_state_df)
+  return(poss_change_matrix)
 }
 
-poss_next_states <- analyze_next_state_after_possession_change(phase_data)
+poss_change_matrix <- build_possession_change_matrix(phase_data)
 
 ###########################
 ### Simulation function ###
 ###########################
 
-
 simulate_game <- function(start_state, score_home, score_away, team_poss, 
-                          transition_matrix, n_sims = 1000) {
+                          transition_matrix, 
+                          post_score_states_scoring_team,
+                          post_score_states_conceding_team,
+                          poss_change_matrix,
+                          n_sims = 1000) {
   
   results <- data.frame(home_wins = 0, away_wins = 0, ties = 0)
   
@@ -457,50 +464,58 @@ simulate_game <- function(start_state, score_home, score_away, team_poss,
     current_score_home <- score_home
     current_score_away <- score_away
     current_team <- team_poss
-    max_plays <- 200  # Safety limit
+    max_plays <- 200
     plays <- 0
     
     while (plays < max_plays) {
       plays <- plays + 1
       
-      # Get possible transitions from current state
       if (!current_state %in% rownames(transition_matrix)) {
-        break  # State not in matrix, end simulation
+        break
       }
       
       probs <- transition_matrix[current_state, ]
-      probs <- probs[probs > 0]  # Only non-zero probabilities
+      probs <- probs[probs > 0]
       
       if (length(probs) == 0) break
       
-      # Sample next event
       next_event <- sample(names(probs), 1, prob = probs)
       
-      # Handle the result
       if (next_event == "End_of_Game") {
         break
         
       } else if (grepl("^Score_", next_event)) {
-        # Extract points scored
         pts <- as.numeric(sub("Score_", "", next_event))
         if (current_team == "Home") {
           current_score_home <- current_score_home + pts
+          current_team <- "Away"
+          current_state <- sample(post_score_states_scoring_team$next_state, 1, 
+                                  prob = post_score_states_scoring_team$probability)
         } else {
           current_score_away <- current_score_away + pts
+          current_team <- "Home"
+          current_state <- sample(post_score_states_scoring_team$next_state, 1, 
+                                  prob = post_score_states_scoring_team$probability)
         }
-        # Possession changes after score
-        current_team <- ifelse(current_team == "Home", "Away", "Home")
         
       } else if (next_event == "Possession_Change") {
         current_team <- ifelse(current_team == "Home", "Away", "Home")
         
+        # Sample next state based on where possession was lost
+        if (current_state %in% rownames(poss_change_matrix)) {
+          next_state_probs <- poss_change_matrix[current_state, ]
+          next_state_probs <- next_state_probs[next_state_probs > 0]
+          
+          if (length(next_state_probs) > 0) {
+            current_state <- sample(names(next_state_probs), 1, prob = next_state_probs)
+          }
+        }
+        
       } else {
-        # Transition to new state
         current_state <- next_event
       }
     }
     
-    # Record result
     if (current_score_home > current_score_away) {
       results$home_wins <- results$home_wins + 1
     } else if (current_score_away > current_score_home) {
@@ -510,7 +525,6 @@ simulate_game <- function(start_state, score_home, score_away, team_poss,
     }
   }
   
-  # Calculate win probabilities
   results$home_win_prob <- results$home_wins / n_sims
   results$away_win_prob <- results$away_wins / n_sims
   results$tie_prob <- results$ties / n_sims
@@ -518,56 +532,56 @@ simulate_game <- function(start_state, score_home, score_away, team_poss,
   return(results)
 }
 
-# Example usage:
+# Run with new possession change matrix
 
-result <- simulate_game(start_state = "1_2.5", 
-                        score_home = 21, 
-                        score_away = 3, 
-                        team_poss = "Home",
-                        transition_matrix = transition_matrix,
-                        n_sims = 1000)
+result <- simulate_game(
+  start_state = "5_2.5", 
+  score_home = 21, 
+  score_away = 14, 
+  team_poss = "Away",
+  transition_matrix = transition_matrix,
+  post_score_states_scoring_team = score_next_states$scoring_team_next,
+  post_score_states_conceding_team = score_next_states$conceding_team_next,
+  poss_change_matrix = poss_change_matrix,
+  n_sims = 1000
+)
 
-print(result)
+result
 
 # Calibrating Model
 
-# Sample game states and prepare for simulation
-prepare_calibration_data <- function(phase_data, n_samples = 2000) {
+prepare_calibration_data <- function(phase_data, n_samples = 2500) {
   
-  # Remove end-of-game states
   phase_data <- phase_data[phase_data$state_result != "End_of_Game", ]
   
-  # Sample random states
   set.seed(123)
   sample_indices <- sample(1:nrow(phase_data), min(n_samples, nrow(phase_data)))
   sampled_states <- phase_data[sample_indices, ]
   
-  # Calculate home and away scores at this moment
   sampled_states$home_score <- ifelse(sampled_states$Team_In_Poss == "Home",
                                       (sampled_states$total_points_both + sampled_states$Points_Difference) / 2,
                                       (sampled_states$total_points_both - sampled_states$Points_Difference) / 2)
   
   sampled_states$away_score <- sampled_states$total_points_both - sampled_states$home_score
   
-  # Determine team_poss parameter ("Home" or "Away")
   sampled_states$team_poss <- ifelse(sampled_states$Team_In_Poss == "Home",
                                      "Home", "Away")
   
-  # Determine if possession team won (for calibration)
   sampled_states$poss_team_won <- sampled_states$Win
   
   return(sampled_states)
 }
 
-calibration_data <- prepare_calibration_data(phase_data, n_samples = 2000)
+calibration_data <- prepare_calibration_data(phase_data, n_samples = 2500)
 
-# Verify the data looks correct
 cat("=== Sample of Calibration Data ===\n")
 print(head(calibration_data[, c("state", "home_score", "away_score", "team_poss", "poss_team_won")], 10))
 
-# Run simulations for all sampled states
-
-run_calibration_sims <- function(calibration_data, transition_matrix, n_sims = 100) {
+run_calibration_sims <- function(calibration_data, transition_matrix, 
+                                 post_score_states_scoring_team,
+                                 post_score_states_conceding_team,
+                                 poss_change_matrix,
+                                 n_sims = 100) {
   
   results <- data.frame(
     state = character(),
@@ -585,24 +599,24 @@ run_calibration_sims <- function(calibration_data, transition_matrix, n_sims = 1
     
     row <- calibration_data[i, ]
     
-    # Run simulation
     sim_result <- simulate_game(
       start_state = row$state,
       score_home = row$home_score,
       score_away = row$away_score,
       team_poss = row$team_poss,
       transition_matrix = transition_matrix,
+      post_score_states_scoring_team = post_score_states_scoring_team,
+      post_score_states_conceding_team = post_score_states_conceding_team,
+      poss_change_matrix = poss_change_matrix,
       n_sims = n_sims
     )
     
-    # Determine predicted win prob for possession team
     if (row$team_poss == "Home") {
       pred_win_prob <- sim_result$home_win_prob
     } else {
       pred_win_prob <- sim_result$away_win_prob
     }
     
-    # Store results
     results <- rbind(results, data.frame(
       state = row$state,
       actual_win = row$poss_team_won,
@@ -617,14 +631,19 @@ run_calibration_sims <- function(calibration_data, transition_matrix, n_sims = 1
   return(results)
 }
 
-calibration_results <- run_calibration_sims(calibration_data, transition_matrix, n_sims = 100)
+calibration_results <- run_calibration_sims(
+  calibration_data, 
+  transition_matrix, 
+  post_score_states_scoring_team = score_next_states$scoring_team_next,
+  post_score_states_conceding_team = score_next_states$conceding_team_next,
+  poss_change_matrix = poss_change_matrix,
+  n_sims = 100
+)
 
-# Calibration plot
 library(ggplot2)
 
 plot_calibration <- function(calibration_results) {
   
-  # Bin predictions
   calibration_results$pred_bin_num <- cut(calibration_results$predicted_win_prob,
                                           breaks = seq(0, 1, 0.1),
                                           include.lowest = TRUE)
@@ -637,7 +656,6 @@ plot_calibration <- function(calibration_results) {
   bin_summary$actual_mean <- bin_summary$actual_win[, 1]
   bin_summary$n <- bin_summary$actual_win[, 2]
   
-  # Calibration curve
   p1 <- ggplot(bin_summary, aes(x = pred_mean, y = actual_mean)) +
     geom_point() +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
@@ -649,7 +667,6 @@ plot_calibration <- function(calibration_results) {
     xlim(0, 1) + ylim(0, 1) +
     theme_minimal()
   
-  # Distribution of predictions
   p2 <- ggplot(calibration_results, aes(x = predicted_win_prob, fill = factor(actual_win))) +
     geom_histogram(bins = 20, alpha = 0.6, position = "identity") +
     labs(title = "Distribution of Predictions",
@@ -665,6 +682,45 @@ plot_calibration <- function(calibration_results) {
 }
 
 plots <- plot_calibration(calibration_results)
+
+# Reduction in Error
+
+rmse <- function(y, p) sqrt(mean((y - p)^2))
+mse <- function(y, p) mean((y - p)^2)
+
+# Extract actual outcomes and predictions from calibration results
+y_actual <- calibration_results$actual_win
+y_pred <- calibration_results$predicted_win_prob
+
+# Compute RMSE and MSE for state space model
+state_space_rmse <- rmse(y_actual, y_pred)
+state_space_mse <- mse(y_actual, y_pred)
+
+# Baselines for error reduction
+naive_rmse <- sqrt(mean((y_actual - 0.5)^2))        
+prop_rmse <- sqrt(mean((y_actual - mean(y_actual))^2)) 
+naive_mse <- mean((y_actual - 0.5)^2)        
+prop_mse <- mean((y_actual - mean(y_actual))^2)
+
+# Error reduction table
+error_reduction <- data.frame(
+  Model = "State Space Model",
+  RMSE = state_space_rmse,
+  MSE = state_space_mse,
+  RMSE_vs_Naive = paste0(round(100 * (naive_rmse - state_space_rmse) / naive_rmse, 2), "%"),
+  MSE_vs_Naive = paste0(round(100 * (naive_mse - state_space_mse) / naive_mse, 2), "%"),
+  RMSE_vs_Prop = paste0(round(100 * (prop_rmse - state_space_rmse) / prop_rmse, 2), "%"),
+  MSE_vs_Prop = paste0(round(100 * (prop_mse - state_space_mse) / prop_mse, 2), "%")
+)
+
+cat("\n=== Error Reduction vs Baselines ===\n")
+print(error_reduction)
+
+cat("\n=== Baseline Performance ===\n")
+cat("Naive (0.5) RMSE:", naive_rmse, "\n")
+cat("Naive (0.5) MSE:", naive_mse, "\n")
+cat("Proportion RMSE:", prop_rmse, "\n")
+cat("Proportion MSE:", prop_mse, "\n")
 
 
 
