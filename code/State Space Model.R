@@ -310,6 +310,138 @@ ggplot(score_agg, aes(x = time_state, y = meter_line, fill = probability)) +
        y = "Meter Line") +
   theme_minimal()
 
+# Testing what happens after a score
+
+analyze_next_state_after_score <- function(phase_data) {
+  
+  scored_indices <- which(grepl("^Score_", phase_data$state_result))
+  
+  next_indices <- scored_indices + 1
+  valid_next <- next_indices <= nrow(phase_data)
+  
+  scored_indices <- scored_indices[valid_next]
+  next_indices <- next_indices[valid_next]
+  
+  scoring_team <- phase_data$Team_In_Poss[scored_indices]
+  next_states <- phase_data$state[next_indices]
+  next_team_poss <- phase_data$Team_In_Poss[next_indices]
+  
+  cat("\n=== NEXT STATE AFTER SCORING (ALL) ===\n")
+  cat("Total scoring events:", length(next_states), "\n\n")
+  
+  if (length(next_states) == 0) {
+    cat("No scoring events found\n")
+    return(NULL)
+  }
+  
+  scoring_team_receives <- scoring_team == next_team_poss
+  
+  cat("\n--- FROM SCORING TEAM PERSPECTIVE (team that receives kickoff) ---\n")
+  scoring_team_states <- next_states[scoring_team_receives]
+  cat("Events where scoring team gets possession:", sum(scoring_team_receives), "\n")
+  
+  if (sum(scoring_team_receives) > 0) {
+    st_probs <- prop.table(table(scoring_team_states))
+    st_df <- as.data.frame(st_probs)
+    names(st_df) <- c("next_state", "probability")
+    st_df <- st_df[order(-st_df$probability), ]
+    print(head(st_df, 20))
+  }
+  
+  cat("\n--- FROM CONCEDING TEAM PERSPECTIVE (team that kicks off) ---\n")
+  conceding_team_states <- next_states[!scoring_team_receives]
+  cat("Events where conceding team gets possession:", sum(!scoring_team_receives), "\n")
+  
+  if (sum(!scoring_team_receives) > 0) {
+    ct_probs <- prop.table(table(conceding_team_states))
+    ct_df <- as.data.frame(ct_probs)
+    names(ct_df) <- c("next_state", "probability")
+    ct_df <- ct_df[order(-ct_df$probability), ]
+    print(head(ct_df, 20))
+  }
+  
+  return(list(
+    scoring_team_next = if(sum(scoring_team_receives) > 0) st_df else NULL,
+    conceding_team_next = if(sum(!scoring_team_receives) > 0) ct_df else NULL
+  ))
+}
+
+score_next_states <- analyze_next_state_after_score(phase_data)
+
+# Looking at possession changes
+
+analyze_next_state_after_possession_change <- function(phase_data) {
+  
+  poss_change_indices <- which(phase_data$state_result == "Possession_Change")
+  
+  next_indices <- poss_change_indices + 1
+  valid_next <- next_indices <= nrow(phase_data)
+  
+  poss_change_indices <- poss_change_indices[valid_next]
+  next_indices <- next_indices[valid_next]
+  
+  losing_team <- phase_data$Team_In_Poss[poss_change_indices]
+  next_states <- phase_data$state[next_indices]
+  next_team_poss <- phase_data$Team_In_Poss[next_indices]
+  
+  cat("\n=== NEXT STATE AFTER POSSESSION CHANGE ===\n")
+  cat("Total possession changes:", length(next_states), "\n\n")
+  
+  if (length(next_states) == 0) {
+    cat("No possession changes found\n")
+    return(NULL)
+  }
+  
+  cat("\n--- FROM TEAM THAT LOST POSSESSION ---\n")
+  losing_team_keeps <- losing_team == next_team_poss
+  cat("(Should be ~0 if possession truly changed)\n")
+  cat("Events where losing team keeps ball:", sum(losing_team_keeps), "\n\n")
+  
+  cat("\n--- FROM TEAM THAT GAINED POSSESSION ---\n")
+  gaining_team_states <- next_states[!losing_team_keeps]
+  cat("Events where gaining team gets ball:", sum(!losing_team_keeps), "\n")
+  
+  if (sum(!losing_team_keeps) > 0) {
+    gt_probs <- prop.table(table(gaining_team_states))
+    gt_df <- as.data.frame(gt_probs)
+    names(gt_df) <- c("next_state", "probability")
+    gt_df <- gt_df[order(-gt_df$probability), ]
+    print(head(gt_df, 20))
+  }
+  
+  return(list(
+    gaining_team_next = if(sum(!losing_team_keeps) > 0) gt_df else NULL
+  ))
+}
+
+poss_next_states <- analyze_next_state_after_possession_change(phase_data)
+
+# Testing what happens after a possession change
+
+analyze_next_state_after_possession_change <- function(phase_data) {
+  
+  poss_change_rows <- phase_data[phase_data$state_result == "Possession_Change", ]
+  
+  poss_change_rows$next_state <- c(phase_data$state[match(poss_change_rows$phase_id, phase_data$phase_id[-nrow(phase_data)]) + 1], NA)
+  
+  poss_change_rows <- poss_change_rows[!is.na(poss_change_rows$next_state), ]
+  
+  cat("\n=== NEXT STATE AFTER POSSESSION CHANGE ===\n")
+  cat("Total possession changes with next state:", nrow(poss_change_rows), "\n\n")
+  
+  next_state_probs <- prop.table(table(poss_change_rows$next_state))
+  next_state_df <- as.data.frame(next_state_probs)
+  names(next_state_df) <- c("next_state", "probability")
+  next_state_df <- next_state_df[order(-next_state_df$probability), ]
+  
+  cat("Top 20 next states after possession change:\n")
+  print(head(next_state_df, 20))
+  
+  return(next_state_df)
+}
+
+poss_next_states <- analyze_next_state_after_possession_change(phase_data)
+
 ###########################
 ### Simulation function ###
 ###########################
