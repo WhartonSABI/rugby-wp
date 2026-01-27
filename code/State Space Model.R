@@ -1,5 +1,10 @@
 
-# setwd("/Users/kennywatts/Documents/Github/Rugby_wp")
+# setwd("/Users/kennywatts/Documents/Github/Rugby-wp")
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
 
 # load data
 phase_data = read.csv("data/phase_2018-19.csv")
@@ -422,11 +427,11 @@ simulate_game <- function(start_state, score_home, score_away, team_poss,
   results <- data.frame(home_wins = 0, away_wins = 0, ties = 0)
   
   for (sim in 1:n_sims) {
-    current_state <- start_state
+    current_state <- as.character(start_state)
     current_score_home <- score_home
     current_score_away <- score_away
     current_team <- team_poss
-    max_plays <- 200
+    max_plays <- 400
     plays <- 0
     
     while (plays < max_plays) {
@@ -483,6 +488,8 @@ simulate_game <- function(start_state, score_home, score_away, team_poss,
             1,
             prob = matching_time_states$probability
           )
+          
+          current_state <- as.character(next_state)
         }
         
         
@@ -490,16 +497,20 @@ simulate_game <- function(start_state, score_home, score_away, team_poss,
         current_team <- ifelse(current_team == "Home", "Away", "Home")
         
         if (current_state %in% rownames(poss_change_matrix)) {
-          next_state_probs <- poss_change_matrix[current_state, ]
-          next_state_probs <- next_state_probs[next_state_probs > 0]
           
-          if (length(next_state_probs) > 0) {
-            current_state <- sample(names(next_state_probs), 1, prob = next_state_probs)
+          row <- poss_change_matrix[current_state, , drop = FALSE]
+          probs <- as.numeric(row)
+          names(probs) <- colnames(poss_change_matrix)
+          
+          probs <- probs[probs > 0]
+          
+          if (length(probs) > 0) {
+            current_state <- as.character(sample(names(probs), 1, prob = probs))
           }
         }
         
       } else {
-        current_state <- next_event
+        current_state <- as.character(next_event)
       }
     }
     
@@ -537,170 +548,136 @@ result
 
 # Showing what happens during a singular simulation
 
-simulate_game_verbose <- function(start_state, score_home, score_away, team_poss, 
-                                  transition_matrix, 
-                                  post_score_states_scoring_team,
-                                  post_score_states_conceding_team,
-                                  poss_change_matrix) {
+simulate_game_play_by_play <- function(start_state, score_home, score_away, team_poss, 
+                                       transition_matrix, 
+                                       post_score_states_scoring_team,
+                                       post_score_states_conceding_team,
+                                       poss_change_matrix,
+                                       max_plays = 400) {
   
-  current_state <- start_state
+  current_state <- as.character(start_state)
   current_score_home <- score_home
   current_score_away <- score_away
   current_team <- team_poss
-  max_plays <- 200
+  
   plays <- 0
   
-  cat("\n=== SIMULATION PROGRESSION ===\n")
-  cat(sprintf("Start: State=%s, Score=%d-%d, Possession=%s\n\n", 
-              current_state, current_score_home, current_score_away, current_team))
+  log <- data.frame(
+    play = integer(),
+    state_before = character(),
+    event = character(),
+    team = character(),
+    home_score = integer(),
+    away_score = integer(),
+    state_after = character(),
+    stringsAsFactors = FALSE
+  )
   
   while (plays < max_plays) {
     plays <- plays + 1
     
-    if (!current_state %in% rownames(transition_matrix)) {
-      cat(sprintf("Play %d: State not in matrix, ending simulation\n", plays))
-      break
-    }
+    if (!current_state %in% rownames(transition_matrix)) break
     
     probs <- transition_matrix[current_state, ]
     probs <- probs[probs > 0]
-    
-    if (length(probs) == 0) {
-      cat(sprintf("Play %d: No valid transitions, ending simulation\n", plays))
-      break
-    }
+    if (length(probs) == 0) break
     
     next_event <- sample(names(probs), 1, prob = probs)
+    state_before <- current_state
     
     if (next_event == "End_of_Game") {
-      cat(sprintf("Play %d: END OF GAME\n", plays))
+      log <- rbind(log, data.frame(
+        play = plays,
+        state_before = state_before,
+        event = "End_of_Game",
+        team = current_team,
+        home_score = current_score_home,
+        away_score = current_score_away,
+        state_after = NA
+      ))
       break
       
     } else if (grepl("^Score_", next_event)) {
       
       pts <- as.numeric(sub("Score_", "", next_event))
-      old_score_home <- current_score_home
-      old_score_away <- current_score_away
-      old_team <- current_team
-      
       current_time_period <- sub("_.*", "", current_state)
       
-      # Decide which post-score transition distribution to use
       if (current_team == "Home") {
-        
-        # Home scores → Away gets possession
         current_score_home <- current_score_home + pts
         current_team <- "Away"
-        
         next_state_df <- post_score_states_scoring_team
-        
       } else {
-        
-        # Away scores → Home gets possession
         current_score_away <- current_score_away + pts
         current_team <- "Home"
-        
         next_state_df <- post_score_states_conceding_team
       }
       
-      # Filter by time period
       matching_time_states <- next_state_df[
         grepl(paste0("^", current_time_period, "_"), next_state_df$next_state),
       ]
       
-      # Sample next state
       if (nrow(matching_time_states) > 0) {
         matching_time_states$probability <-
           matching_time_states$probability / sum(matching_time_states$probability)
         
-        next_state <- sample(
+        current_state <- sample(
           matching_time_states$next_state,
           1,
           prob = matching_time_states$probability
         )
+        
+        current_state <- as.character(current_state)
+        
       }
       
-      cat(sprintf(
-        "Play %d: SCORE! %s scored %d points. Score: %d-%d → %d-%d. New state: %s, Possession: %s\n",
-        plays, old_team, pts,
-        old_score_home, old_score_away,
-        current_score_home, current_score_away,
-        current_state, current_team
-      ))
-    }
-      else if (next_event == "Possession_Change") {
-      old_state <- current_state
-      old_team <- current_team
+    } else if (next_event == "Possession_Change") {
+      
       current_team <- ifelse(current_team == "Home", "Away", "Home")
       
       if (current_state %in% rownames(poss_change_matrix)) {
-        next_state_probs <- poss_change_matrix[current_state, ]
-        next_state_probs <- next_state_probs[next_state_probs > 0]
         
-        if (length(next_state_probs) > 0) {
-          current_state <- sample(names(next_state_probs), 1, prob = next_state_probs)
+        row <- poss_change_matrix[current_state, , drop = FALSE]
+        probs <- as.numeric(row)
+        names(probs) <- colnames(poss_change_matrix)
+        
+        probs <- probs[probs > 0]
+        
+        if (length(probs) > 0) {
+          current_state <- as.character(sample(names(probs), 1, prob = probs))
         }
       }
       
-      cat(sprintf("Play %d: POSSESSION CHANGE. %s → %s. State: %s → %s\n",
-                  plays, old_team, current_team, old_state, current_state))
-      
     } else {
-      old_state <- current_state
-      current_state <- next_event
-      cat(sprintf("Play %d: State transition: %s → %s. Possession: %s\n",
-                  plays, old_state, current_state, current_team))
+      current_state <- as.character(next_event)
     }
+    
+    log <- rbind(log, data.frame(
+      play = plays,
+      state_before = state_before,
+      event = next_event,
+      team = current_team,
+      home_score = current_score_home,
+      away_score = current_score_away,
+      state_after = current_state
+    ))
   }
   
-  cat(sprintf("\nFinal Score: Home %d - Away %d\n", current_score_home, current_score_away))
-  
-  if (current_score_home > current_score_away) {
-    cat("Winner: Home\n")
-  } else if (current_score_away > current_score_home) {
-    cat("Winner: Away\n")
-  } else {
-    cat("Result: Tie\n")
-  }
-  
-  return(list(
-    final_score_home = current_score_home,
-    final_score_away = current_score_away,
-    winner = ifelse(current_score_home > current_score_away, "Home",
-                    ifelse(current_score_away > current_score_home, "Away", "Tie"))
-  ))
+  return(log)
 }
 
-verbose_result <- simulate_game_verbose(
-  start_state = "8_2.5", 
-  score_home = 21, 
-  score_away = 14, 
-  team_poss = "Away",
+
+pbp <- simulate_game_play_by_play(
+  start_state = "8_69",
+  score_home = 0,
+  score_away = 0,
+  team_poss = "Home",
   transition_matrix = transition_matrix,
   post_score_states_scoring_team = score_next_states$scoring_team_next,
   post_score_states_conceding_team = score_next_states$conceding_team_next,
   poss_change_matrix = poss_change_matrix
 )
 
-# Still issues clearly
-
-inspect_state <- "8_31"
-
-trans <- transition_matrix[inspect_state, ]
-trans <- trans[trans > 0]
-
-# Extract time period from next states
-trans_df <- data.frame(
-  next_state = names(trans),
-  probability = as.numeric(trans),
-  next_time = as.numeric(sub("_.*", "", names(trans)))
-)
-
-trans_df <- trans_df[order(trans_df$next_time, -trans_df$probability), ]
-
-print(trans_df)
-
-poss_change_matrix["8_31", ]
+pbp
 
 
 
