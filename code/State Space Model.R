@@ -53,6 +53,7 @@ last_play <- phase_data %>%
                                      -Final_Points_Difference)
   )
 
+
 # making win percentage column
 
 last_play <- last_play %>%
@@ -89,6 +90,89 @@ last_play <- last_play %>%
   ) %>%
   ungroup()
 
+# Making an Elo Column
+
+# Get the match-level data
+matches <- phase_data %>%
+  group_by(Round, Home, Away) %>%
+  filter(ID == max(ID)) %>%
+  ungroup() %>%
+  mutate(
+    last_play_points = str_extract(Outcome, "[-+]?\\d+") %>% as.numeric(),
+    last_play_points = ifelse(is.na(last_play_points), 0, last_play_points),
+    Score_Change = last_play_points,
+    Final_Points_Difference = Points_Difference + Score_Change,
+    Final_Points_Diff_Home = if_else(Team_In_Poss == "Home",
+                                     Final_Points_Difference,
+                                     -Final_Points_Difference)
+  ) %>%
+  select(Round, Home, Away, Final_Points_Diff_Home) %>%
+  distinct() %>%
+  arrange(Round)
+
+# Calculate Elo ratings
+initial_elo <- 1500
+teams <- unique(c(matches$Home, matches$Away))
+team_current_elo <- setNames(rep(initial_elo, length(teams)), teams)
+
+matches$Home_Elo_Before <- NA
+matches$Away_Elo_Before <- NA
+
+for(i in 1:nrow(matches)) {
+  home <- matches$Home[i]
+  away <- matches$Away[i]
+  
+  # Store Elo before match
+  matches$Home_Elo_Before[i] <- team_current_elo[home]
+  matches$Away_Elo_Before[i] <- team_current_elo[away]
+  
+  # Calculate new Elo
+  home_won <- matches$Final_Points_Diff_Home[i] > 0
+  
+  if(home_won) {
+    expected <- 1 / (1 + 10^((team_current_elo[away] - team_current_elo[home]) / 400))
+    elo_change <- 32 * (1 - expected)
+    team_current_elo[home] <- team_current_elo[home] + elo_change
+    team_current_elo[away] <- team_current_elo[away] - elo_change
+  } else {
+    expected <- 1 / (1 + 10^((team_current_elo[home] - team_current_elo[away]) / 400))
+    elo_change <- 32 * (1 - expected)
+    team_current_elo[away] <- team_current_elo[away] + elo_change
+    team_current_elo[home] <- team_current_elo[home] - elo_change
+  }
+}
+
+last_play <- matches %>%
+  pivot_longer(
+    cols = c(Home, Away),
+    names_to = "Side",
+    values_to = "Team"
+  ) %>%
+  mutate(
+    Win = case_when(
+      Side == "Home" & Final_Points_Diff_Home > 0  ~ 1,
+      Side == "Home" & Final_Points_Diff_Home == 0 ~ 0.5,
+      Side == "Home" & Final_Points_Diff_Home < 0  ~ 0,
+      Side == "Away" & Final_Points_Diff_Home < 0  ~ 1,
+      Side == "Away" & Final_Points_Diff_Home == 0 ~ 0.5,
+      Side == "Away" & Final_Points_Diff_Home > 0  ~ 0
+    ),
+    Elo_Before = case_when(
+      Side == "Home" ~ Home_Elo_Before,
+      Side == "Away" ~ Away_Elo_Before
+    ),
+    Round = as.numeric(Round)
+  ) %>%
+  arrange(Team, Round) %>%
+  group_by(Team) %>%
+  mutate(
+    Games_Played = lag(row_number(), default = 0),
+    Wins_Before = lag(cumsum(Win), default = 0),
+    WinPct_Before = if_else(Games_Played == 0, 0.5, Wins_Before / Games_Played)
+  ) %>%
+  ungroup() %>%
+  select(-Home_Elo_Before, -Away_Elo_Before)
+
 # Get teams in possession
 phase_data <- phase_data %>%
   mutate(
@@ -99,7 +183,7 @@ phase_data <- phase_data %>%
   ) %>%
   # Add in win percentage for team in possession and whether they win
   left_join(
-    last_play %>% dplyr::select(Team, Round, WinPct_Before, Win),
+    last_play %>% dplyr::select(Team, Round, WinPct_Before, Win, Elo_Before),
     by = c("Team_for_join" = "Team", "Round" = "Round")
   )
 
