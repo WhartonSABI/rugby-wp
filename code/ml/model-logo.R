@@ -806,7 +806,7 @@ cal_rf_iso <- calibration_df(rf_pred_cal, y_test[eval_idx])
 cal_xgb_iso <- calibration_df(xgb_pred_cal, y_test[eval_idx])
 
 # Now plot
-bind_rows(
+cal_plot_xgb_isotonic <- bind_rows(
   cal_xgb %>% mutate(model = "Original"),
   cal_xgb_iso %>% mutate(model = "Isotonic Calibrated")
 ) %>%
@@ -819,6 +819,14 @@ bind_rows(
     title = "LOGO CV — XGBoost Calibration: Original vs Isotonic (Eval Set)"
   ) +
   theme_minimal()
+
+ggsave(
+  "plots/ml/logo/calibration_xgb_isotonic_logo.png",
+  cal_plot_xgb_isotonic,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
 
 # This is wrong currently
 
