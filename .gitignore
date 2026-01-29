@@ -2,6 +2,10 @@
 ### FILES & DIRECTORIES ###
 ###########################
 
+# dynamic program
+dp.R
+plots/markov/dp/
+
 # for literature
 papers
 
