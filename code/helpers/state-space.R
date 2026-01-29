@@ -32,8 +32,8 @@ build_time_state <- function(seconds_remaining) {
     TRUE ~ "middle"
   )
   time_state <- paste(half, time_bucket, sep = "_")
-  factor(time_state, levels = c("2h_end", "2h_middle", "2h_start",
-                                "1h_end", "1h_middle", "1h_start"))
+  factor(time_state, levels = c("1h_start", "1h_middle", "1h_end",
+                                "2h_start", "2h_middle", "2h_end"))
 }
 
 build_state <- function(time_state, meter_line, team_poss, score_home, score_away) {

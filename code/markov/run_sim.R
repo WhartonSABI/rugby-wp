@@ -15,10 +15,14 @@ source("code/helpers/calibration.R")
 source("code/helpers/markov-sim.R")
 
 # Build phase-level data and initialize state space.
-phase_data <- prepare_phase_data(save_processed = TRUE)
-phase_data$game_id <- paste(phase_data$Home, phase_data$Away, phase_data$Round, sep = "_")
-
-state_space <- build_state_space(phase_data, save_transition = TRUE)
+transition_path <- "data/results/transition_probs.rds"
+if (file.exists(transition_path)) {
+  state_space <- readRDS(transition_path)
+} else {
+  phase_data <- prepare_phase_data(save_processed = TRUE)
+  state_space <- build_state_space(phase_data, save_transition = TRUE)
+}
+phase_data <- state_space$phase_data
 phase_data <- state_space$phase_data
 transition_matrix <- state_space$transition_matrix
 transition_df <- state_space$transition_df
@@ -82,7 +86,7 @@ print_error_reduction(results_out_sample, "State Space Model (Markov Chain Simul
 ### EXAMPLE GAME ###
 ####################
 
-start_time_state <- time_state_levels[length(time_state_levels)]
+start_time_state <- time_state_levels[1]
 # Example: away possession near the goal with a 21-14 scoreline.
 start_state <- build_state(time_state = start_time_state, meter_line = 2.5, team_poss = "Away",
   score_home = 21, score_away = 14)
