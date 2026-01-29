@@ -8,6 +8,7 @@ library(randomForest)
 library(tidyr)
 library(isotone)
 
+# Raw phase-level dataset for tuning workflow.
 phase_data = read.csv("data/raw/phase_2018-19.csv")
 
 ################################
@@ -26,6 +27,7 @@ phase_data <- phase_data %>%
   )
 
 # Getting final score of the match
+# Build final score table for team-level win labels.
 last_play <- phase_data %>%
   group_by(Round, Home, Away) %>%
   filter(ID == max(ID)) %>%
@@ -43,6 +45,7 @@ last_play <- phase_data %>%
   )
 
 # making win percentage column
+# Convert to team rows and compute win percentages.
 
 last_play <- last_play %>%
   dplyr::select(Round, Home, Away, Final_Points_Diff_Home) %>%
@@ -68,6 +71,7 @@ last_play <- last_play %>%
   arrange(Team, Round)
 
 # Get running win percentages
+# Lag to avoid leakage of current match outcome.
 last_play <- last_play %>%
   group_by(Team) %>%
   arrange(Round) %>%
@@ -79,6 +83,7 @@ last_play <- last_play %>%
   ungroup()
 
 # Get teams in possession
+# Attach team-in-possession and win outcome per phase.
 phase_data <- phase_data %>%
   mutate(
     Team_for_join = case_when(
@@ -93,12 +98,14 @@ phase_data <- phase_data %>%
   )
 
 # Define which team is in possession
+# Binary indicator for home possession.
 phase_data <- phase_data %>%
   mutate(
     Home_Attack = if_else(Team_In_Poss == "Home", 1, 0)
   )
 
 # Get opponent data
+# Join opponent strength and compute differentials.
 phase_data <- phase_data %>%
   mutate(
     Opponent = if_else(Team_In_Poss == "Home", Away, Home)
@@ -117,6 +124,7 @@ phase_data <- phase_data %>%
   )
 
 # Seconds remaining in half
+# Normalize time within each half for time-sensitive features.
 phase_data <- phase_data %>%
   mutate(
     Seconds_Remaining_Half = if_else(
@@ -127,6 +135,7 @@ phase_data <- phase_data %>%
   )
 
 # First phase or open play
+# Flag first-phase plays.
 
 phase_data <- phase_data %>%
   mutate(
@@ -137,6 +146,7 @@ phase_data <- phase_data %>%
     ))
 
 # Adding meter line of play start
+# Map location names into numeric meter lines.
 location_names <- c("5m-Goal (opp)", "22m-5m (opp)", "10m-22m (opp)",
                     "Half-10m (opp)","10m-Half (own)", "22m-10m (own)",
                     "5m-22m (own)", "Goal-5m (own)")
@@ -147,6 +157,7 @@ lookup <- setNames(location_meters, location_names)
 phase_data$meter_line <- lookup[phase_data$Location]
 
 # Adding scores ahead variable
+# Bucket score differential into discrete score-ahead levels.
 
 phase_data <- phase_data %>%
   mutate(
@@ -158,6 +169,7 @@ phase_data <- phase_data %>%
   )
 
 # Adding whether you have possession or not
+# Expand to team perspective with possession-relative features.
 
 phase_team <- phase_data %>%
   rowwise() %>%
@@ -214,6 +226,7 @@ phase_team <- phase_data %>%
   ungroup()
 
 # Adding adjusted score (like Lock & Nettleton (2014))
+# Downweight score differential early in the game.
 
 phase_team <- phase_team %>%
   mutate(adjusted_diff = Points_Diff_Team/((Seconds_Remaining+1)^0.5))
@@ -223,6 +236,7 @@ phase_team <- phase_team %>%
 ######################
 
 # Selecting predictors
+# Feature set used for tuning experiments.
 predictors <- c(
   "meter_line_Team",
   "Points_Diff_Team",
@@ -245,6 +259,7 @@ wp_model <- phase_team %>%
   na.omit()
 
 # Splitting and shuffling data
+# Random split for tuning experiments.
 wp_shuffled <- wp_model %>%
   dplyr::select(-Round) %>%
   dplyr::slice_sample(prop = 1)
@@ -271,6 +286,7 @@ library(randomForest)
 library(ModelMetrics)
 
 # Tuning Parameters
+# Random forest grid over mtry and nodesize.
 
 p <- ncol(train_data) - 1   # number of predictors
 
@@ -407,6 +423,7 @@ mono_constraints["adjusted_diff"]    <- 1
 mono_constraints["meter_line_Team"]  <- -1
 
 # Parameter Tuning Grid
+# Randomized XGBoost hyperparameter grid.
 
 grid_size <- 30
 
@@ -425,6 +442,7 @@ xgb_grid <- tibble(
 xgb_grid
 
 # Tuning
+# Evaluate grid settings with early stopping.
 
 fit_xgb_once <- function(params, dtrain, dtest) {
   
@@ -513,6 +531,7 @@ xgb_prob <- predict(xgb_fit, dtest)
 
 
 # Model Performance
+# Compare RMSE across tuned models.
 
 rmse <- function(y, p) sqrt(mean((y - p)^2))
 
@@ -536,6 +555,7 @@ results
 #########################
 
 # Calibration
+# Evaluate calibration on training data.
 
 # Random Forest
 train_data$Win_Prob_RF <- predict(
@@ -605,6 +625,7 @@ cal_all <- bind_rows(
 )
 
 # Calibration plot
+# Plot observed vs predicted win rates by bin.
 
 plot_calibration <- function(cal_df, model_name) {
   ggplot(cal_df, aes(mean_pred, win_rate)) +
@@ -648,6 +669,7 @@ r2_calibration
 ######################
 
 # Example Game Random Forest
+# Plot win probability trajectories on a single match.
 
 example_game <- phase_team %>%
   filter(
@@ -758,6 +780,7 @@ ggsave("plots/ml/tuning/example_game_plot.png", example_plot, width = 10, height
 
 
 # Plotting Random Forest Partials
+# Partial dependence plots for RF predictors.
 
 # Baseline values
 baseline <- train_data %>%
@@ -817,6 +840,7 @@ for (name in names(pd_list)) {
 }
 
 # Plotting xgboost partials
+# Partial dependence plots for XGBoost predictors.
 
 partial_xgb <- function(var, grid_length = 50) {
   

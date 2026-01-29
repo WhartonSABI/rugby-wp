@@ -9,6 +9,7 @@ library(tidyr)
 library(isotone)
 
 # load data
+# Raw phase-level events for the full season.
 phase_data = read.csv("data/raw/phase_2018-19.csv")
 
 ################################
@@ -27,6 +28,7 @@ phase_data <- phase_data %>%
   )
 
 # Finding total points
+# Identify scoring events and track cumulative points by match.
 
 phase_data <- phase_data %>%
   group_by(Round, Home, Away) %>%
@@ -39,6 +41,7 @@ phase_data <- phase_data %>%
   ungroup()
 
 # Getting final score of the match
+# Build final score table for team-level win labels.
 last_play <- phase_data %>%
   group_by(Round, Home, Away) %>%
   filter(ID == max(ID)) %>%
@@ -56,6 +59,7 @@ last_play <- phase_data %>%
   )
 
 # making win percentage column
+# Convert to team rows and add running win percentage.
 
 last_play <- last_play %>%
   dplyr::select(Round, Home, Away, Final_Points_Diff_Home) %>%
@@ -81,6 +85,7 @@ last_play <- last_play %>%
   arrange(Team, Round)
 
 # Get running win percentages
+# WinPct_Before is lagged to avoid leakage of the current match.
 last_play <- last_play %>%
   group_by(Team) %>%
   arrange(Round) %>%
@@ -92,6 +97,7 @@ last_play <- last_play %>%
   ungroup()
 
 # Get teams in possession
+# Attach team-in-possession and win outcome to each phase.
 phase_data <- phase_data %>%
   mutate(
     Team_for_join = case_when(
@@ -106,12 +112,14 @@ phase_data <- phase_data %>%
   )
 
 # Define which team is in possession
+# Binary indicator for home possession.
 phase_data <- phase_data %>%
   mutate(
     Home_Attack = if_else(Team_In_Poss == "Home", 1, 0)
   )
 
 # Get opponent data
+# Join opponent strength and compute differentials.
 phase_data <- phase_data %>%
   mutate(
     Opponent = if_else(Team_In_Poss == "Home", Away, Home)
@@ -131,6 +139,7 @@ phase_data <- phase_data %>%
 
 
 # First phase or open play
+# Flag first-phase plays to isolate structured possessions.
 
 phase_data <- phase_data %>%
   mutate(
@@ -141,11 +150,13 @@ phase_data <- phase_data %>%
     ))
 
 # Filter for first phase
+# Keep only first-phase events for training.
 
 phase_data <- phase_data %>%
   filter(first_phase == 1)
 
 # Adding meter line of play start
+# Map location names into numeric meter lines.
 location_names <- c("5m-Goal (opp)", "22m-5m (opp)", "10m-22m (opp)",
                     "Half-10m (opp)","10m-Half (own)", "22m-10m (own)",
                     "5m-22m (own)", "Goal-5m (own)")
@@ -156,6 +167,7 @@ lookup <- setNames(location_meters, location_names)
 phase_data$meter_line <- lookup[phase_data$Location]
 
 # Adding scores ahead variable
+# Bucket score differential into discrete score-ahead levels.
 
 phase_data <- phase_data %>%
   mutate(
@@ -167,6 +179,7 @@ phase_data <- phase_data %>%
   )
 
 # Adding whether you have possession or not
+# Expand to team perspective with possession-relative features.
 
 phase_team <- phase_data %>%
   rowwise() %>%
@@ -223,6 +236,7 @@ phase_team <- phase_data %>%
   ungroup()
 
 # Adding adjusted score (like Lock & Nettleton (2014))
+# Downweight score differential early in the game.
 
 phase_team <- phase_team %>%
   mutate(adjusted_diff = Points_Diff_Team/((Seconds_Remaining+1)^0.5))
@@ -233,6 +247,7 @@ phase_team <- phase_team %>%
 ######################
 
 # Selecting predictors
+# Feature set used for modeling.
 predictors <- c(
   "meter_line_Team",
   "Points_Diff_Team",
@@ -246,6 +261,7 @@ predictors <- c(
 # Converting categorical variables to factors and making sure Win is numeric
 
 # Splitting data
+# Split by game_id to avoid within-game leakage.
 
 phase_team <- phase_team %>%
   mutate(game_id = paste(Round, Home, Away, sep = "_"))
@@ -260,10 +276,12 @@ wp_model <- phase_team %>%
   na.omit()
 
 # Setting seed
+# Reproducible train/test split.
 
 set.seed(3)
 
 # Splitting data
+# Use game-level split for model evaluation.
 
 game_ids <- wp_model %>%
   distinct(game_id)
@@ -280,6 +298,7 @@ test_data <- wp_model %>%
   select(-game_id, -Round)
 
 # Random Forest
+# Fit a baseline RF regression for win probability.
 
 library(randomForest)
 
@@ -295,6 +314,7 @@ rf_fit <- randomForest(
 rf_pred <- predict(rf_fit, newdata = test_data)
 
 # Variable importance plot
+# Visualize RF variable importance.
 
 var_imp <- as.data.frame(importance(rf_fit)) %>%
   rownames_to_column("Variable") %>%
@@ -322,6 +342,7 @@ ggsave(
 )
 
 # Logistic Regression
+# Linear baseline for comparison.
 
 logit_fit <- glm(
   Win ~ . - Seconds_Remaining,
@@ -337,6 +358,7 @@ logit_pred <- predict(
 
 
 # XGBoost
+# Gradient boosting with monotonicity constraints.
 
 library(xgboost)
 
@@ -375,6 +397,7 @@ xgb_pred <- predict(xgb_fit, dtest)
 
 
 # Model Performance
+# Compute RMSE and error reduction vs baselines.
 
 table(y_test) / length(y_test)
 
@@ -407,6 +430,7 @@ error_reduction <- tibble(
 error_reduction
 
 # Log-loss
+# Three-way log loss for win/draw/loss encoding.
 
 log_loss_3way <- function(y_test, p_pred, eps = 1e-15) {
   p_pred <- pmax(pmin(p_pred, 1 - eps), eps)
@@ -436,6 +460,7 @@ results %>% arrange(LogLoss)
 #########################
 
 # Calibration (using out-of-sample test data)
+# Bin predictions and compare to empirical win rates.
 
 calibration_df <- function(prob, y, n_bins = 20) {
   tibble(prob = prob, y = y) %>%
@@ -484,6 +509,7 @@ cal_all <- bind_rows(
 )
 
 # Calibration plot
+# Plot predicted vs observed win rates by bin.
 
 plot_calibration <- function(cal_df, model_name) {
   ggplot(cal_df, aes(mean_pred, win_rate)) +
@@ -527,6 +553,7 @@ r2_calibration
 ######################
 
 # Example Game Random Forest
+# Plot model win probabilities across a single match.
 
 example_game <- phase_team %>%
   filter(
@@ -600,6 +627,7 @@ example_long <- example_game %>%
   )
 
 # Scoring events
+# Mark score changes on win-probability plots.
 
 score_changes <- example_game %>%
   arrange(desc(Seconds_Remaining)) %>%
@@ -610,6 +638,7 @@ score_changes <- example_game %>%
   select(Seconds_Remaining, Points_Diff_Team)
 
 # Plotting Game
+# Generate multi-model win probability trajectories.
 
 example_plot <- ggplot(example_long, aes(
   x = Seconds_Remaining,
@@ -642,6 +671,7 @@ ggsave("plots/ml/base/example_game_plot.png", example_plot, width = 10, height =
 
 
 # Plotting Random Forest Partials
+# Partial dependence plots for RF predictors.
 
 # Baseline values
 baseline <- train_data %>%
@@ -769,6 +799,7 @@ ggsave(
 )
 
 # Plotting xgboost partials
+# Partial dependence plots for XGBoost predictors.
 
 partial_xgb <- function(var, grid_length = 50) {
   

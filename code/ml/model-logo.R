@@ -10,6 +10,7 @@ library(isotone)
 library(scales)
 
 # load data
+# Raw phase-level dataset for LOGO CV workflow.
 phase_data = read.csv("data/raw/phase_2018-19.csv")
 
 ################################
@@ -28,6 +29,7 @@ phase_data <- phase_data %>%
   )
 
 # Finding total points
+# Identify scoring events and cumulative points.
 
 phase_data <- phase_data %>%
   group_by(Round, Home, Away) %>%
@@ -40,6 +42,7 @@ phase_data <- phase_data %>%
   ungroup()
 
 # Getting final score of the match
+# Build final score table for team-level win labels.
 last_play <- phase_data %>%
   group_by(Round, Home, Away) %>%
   filter(ID == max(ID)) %>%
@@ -57,6 +60,7 @@ last_play <- phase_data %>%
   )
 
 # making win percentage column
+# Convert to team rows and compute win percentages.
 
 last_play <- last_play %>%
   dplyr::select(Round, Home, Away, Final_Points_Diff_Home) %>%
@@ -82,6 +86,7 @@ last_play <- last_play %>%
   arrange(Team, Round)
 
 # Get running win percentages
+# Lag to avoid leakage of current match outcome.
 last_play <- last_play %>%
   group_by(Team) %>%
   arrange(Round) %>%
@@ -93,6 +98,7 @@ last_play <- last_play %>%
   ungroup()
 
 # Get teams in possession
+# Attach team-in-possession and win outcome per phase.
 phase_data <- phase_data %>%
   mutate(
     Team_for_join = case_when(
@@ -107,12 +113,14 @@ phase_data <- phase_data %>%
   )
 
 # Define which team is in possession
+# Binary indicator for home possession.
 phase_data <- phase_data %>%
   mutate(
     Home_Attack = if_else(Team_In_Poss == "Home", 1, 0)
   )
 
 # Get opponent data
+# Join opponent strength and compute differentials.
 phase_data <- phase_data %>%
   mutate(
     Opponent = if_else(Team_In_Poss == "Home", Away, Home)
@@ -132,6 +140,7 @@ phase_data <- phase_data %>%
 
 
 # First phase or open play
+# Flag first-phase plays.
 
 phase_data <- phase_data %>%
   mutate(
@@ -142,11 +151,13 @@ phase_data <- phase_data %>%
     ))
 
 # Filter for first phase
+# Keep only first-phase events for training.
 
 phase_data <- phase_data %>%
   filter(first_phase == 1)
 
 # Adding meter line of play start
+# Map location names into numeric meter lines.
 location_names <- c("5m-Goal (opp)", "22m-5m (opp)", "10m-22m (opp)",
                     "Half-10m (opp)","10m-Half (own)", "22m-10m (own)",
                     "5m-22m (own)", "Goal-5m (own)")
@@ -157,6 +168,7 @@ lookup <- setNames(location_meters, location_names)
 phase_data$meter_line <- lookup[phase_data$Location]
 
 # Adding scores ahead variable
+# Bucket score differential into discrete score-ahead levels.
 
 phase_data <- phase_data %>%
   mutate(
@@ -168,6 +180,7 @@ phase_data <- phase_data %>%
   )
 
 # Adding whether you have possession or not
+# Expand to team perspective with possession-relative features.
 
 phase_team <- phase_data %>%
   rowwise() %>%
@@ -224,6 +237,7 @@ phase_team <- phase_data %>%
   ungroup()
 
 # Adding adjusted score (like Lock & Nettleton (2014))
+# Downweight score differential early in the game.
 
 phase_team <- phase_team %>%
   mutate(adjusted_diff = Points_Diff_Team/((Seconds_Remaining+1)^0.5))
@@ -234,6 +248,7 @@ phase_team <- phase_team %>%
 ######################
 
 # Selecting predictors
+# Feature set used for LOGO modeling.
 predictors <- c(
   "meter_line_Team",
   "Points_Diff_Team",
@@ -268,20 +283,24 @@ library(ggplot2)
 library(tibble)
 
 # Get unique game IDs
+# LOGO CV leaves one game out per fold.
 game_ids <- wp_model %>%
   distinct(game_id) %>%
   pull(game_id)
 
 # Initialize storage for predictions
+# Store fold predictions for downstream evaluation.
 rf_all_predictions <- tibble()
 logit_all_predictions <- tibble()
 xgb_all_predictions <- tibble()
 
 # Initialize storage for variable importance (will average across folds)
+# Aggregate feature importances across folds.
 rf_var_imp_list <- list()
 xgb_var_imp_list <- list()
 
 # Leave-One-Game-Out Cross-Validation
+# Train each model excluding one game at a time.
 for (i in seq_along(game_ids)) {
   
   test_game <- game_ids[i]
@@ -530,6 +549,7 @@ write.csv(xgb_all_predictions, "data/results/xgb_logo_predictions.csv", row.name
 
 #============================================================
 # RESULTS SUMMARY
+# Report prediction counts and output files.
 #============================================================
 cat("\n=== LOGO Cross-Validation Complete ===\n")
 cat(sprintf("Total games: %d\n", length(game_ids)))
@@ -539,6 +559,7 @@ cat(sprintf("XGB predictions: %d rows\n", nrow(xgb_all_predictions)))
 
 #########################
 ### Model Performance ###
+# Compute RMSE/MSE/log loss from LOGO predictions.
 #########################
 
 # Load LOGO predictions
@@ -621,9 +642,11 @@ write.csv(results, "data/results/logo_model_performance.csv", row.names = FALSE)
 
 #########################
 ### Model Calibration ###
+# Evaluate calibration on LOGO CV predictions.
 #########################
 
 # Calibration function
+# Bin predicted probabilities into fixed-width bins.
 calibration_df <- function(prob, y, n_bins = 20) {
   tibble(prob = prob, y = y) %>%
     # Fixed bins along the predicted probability axis (0 to 1)
@@ -647,6 +670,7 @@ calibration_df <- function(prob, y, n_bins = 20) {
 }
 
 # Calibration tables (using LOGO CV predictions)
+# Build per-model calibration tables.
 cal_logit <- calibration_df(logit_pred, y_test)
 cal_rf <- calibration_df(rf_pred, y_test)
 cal_xgb <- calibration_df(xgb_pred, y_test)
@@ -658,6 +682,7 @@ cal_all <- bind_rows(
 )
 
 # Calibration plot function
+# Plot observed vs predicted win rates for LOGO CV.
 plot_calibration <- function(cal_df, model_name) {
   ggplot(cal_df, aes(mean_pred, win_rate)) +
     geom_line(linewidth = 1) +
@@ -708,6 +733,7 @@ cal_plot_combined <- ggplot(cal_all, aes(mean_pred, win_rate, color = model)) +
 ggsave("plots/ml/logo/calibration_all_models_logo.png", cal_plot_combined, width = 8, height = 6, dpi = 300)
 
 # Calculate calibration metrics (Brier score)
+# Compute Brier score per model.
 brier_score <- function(y, p) {
   mean((y - p)^2)
 }
@@ -737,6 +763,7 @@ cat("Calibration plots: plots/ml/logo/calibration_*_logo.png\n")
 
 ########################
 ### Isotonic Mapping ###
+# Fit isotonic calibration on a subset of predictions.
 ########################
 
 # Function to apply isotonic calibration
@@ -803,6 +830,7 @@ bind_rows(
 ######################
 
 # Identify the example game first
+# Keep one match aside for a narrative plot.
 example_game_id <- phase_team %>%
   filter(
     Round == 22,
@@ -816,6 +844,7 @@ cat(sprintf("Example game ID: %s\n", example_game_id))
 
 ####################################################
 ### Train Models on All Data EXCEPT Example Game ###
+# Hold out the example game for out-of-sample trajectories.
 ####################################################
 
 cat("Training models on all data except example game...\n")
@@ -878,6 +907,7 @@ cat("Models trained successfully (holdout approach)!\n\n")
 
 ############################
 ### Predict Example Game ###
+# Generate win probability series for the example game.
 ############################
 
 # Extract example game data
@@ -1024,6 +1054,7 @@ predictors <- setdiff(names(train_data_full), "Win")
 
 ###################################################
 ### Train Models on Full Data for Partial Plots ###
+# Refit models on full data to produce smoother partials.
 ###################################################
 
 cat("Training models on full data for partial dependence plots...\n")
@@ -1066,6 +1097,7 @@ cat("Models trained!\n\n")
 
 #######################
 ### Baseline Values ###
+# Use median/mode baselines for partial dependence grids.
 #######################
 
 baseline <- train_data_full %>%
@@ -1080,6 +1112,7 @@ baseline <- train_data_full %>%
 
 ##################################################
 ### Random Forest Partial Dependence Functions ###
+# RF partial dependence helpers.
 ##################################################
 
 partial_rf <- function(var, grid_length = 50) {
@@ -1146,6 +1179,7 @@ partial_rf_seconds_by_score <- function(
 
 ############################################
 ### XGBoost Partial Dependence Functions ###
+# XGBoost partial dependence helpers.
 ############################################
 
 partial_xgb <- function(var, grid_length = 50) {
@@ -1229,6 +1263,7 @@ partial_xgb_seconds_by_score <- function(
 
 ######################
 ### Generate Partial Dependence Data ###
+# Generate data for partial dependence plots.
 ######################
 
 cat("Generating partial dependence plots...\n")
@@ -1258,6 +1293,7 @@ pd_seconds_xgb <- partial_xgb_seconds_by_score()
 
 ###########################################
 ### Create and Save Random Forest Plots ###
+# Save RF partial dependence plots.
 ###########################################
 
 for (name in names(pd_list)) {
@@ -1319,6 +1355,7 @@ ggsave(
 
 ######################
 ### Create and Save XGBoost Plots ###
+# Save XGBoost partial dependence plots.
 ######################
 
 for (name in names(pd_list_xgb)) {
@@ -1380,6 +1417,7 @@ ggsave(
 
 #################################
 ### Combined Comparison Plots ###
+# Compare RF vs XGBoost partials on key features.
 #################################
 
 # Combine RF and XGBoost for comparison
