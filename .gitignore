@@ -3,7 +3,7 @@
 ###########################
 
 # dynamic program
-dp.R
+*dp.R
 plots/markov/dp/
 
 # for literature
