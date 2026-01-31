@@ -86,11 +86,11 @@ print_error_reduction(results_out_sample, "State Space Model (Markov Chain Simul
 ### EXAMPLE GAME ###
 ####################
 
-start_time_state <- time_state_levels[1]
+start_time_state <- time_state_levels[6]
 # Example: away possession near the goal with a 21-14 scoreline.
-start_state <- build_state(time_state = start_time_state, meter_line = 2.5, team_poss = "Away",
-  score_home = 21, score_away = 14)
-result <- simulate_game(start_state, 21, 14, "Away", transition_matrix,
+start_state <- build_state(time_state = start_time_state, meter_line = 45, team_poss = "Home",
+  score_home = 0, score_away = 0)
+result <- simulate_game(start_state, 0, 0, "Home", transition_matrix,
   score_next_states, poss_change_matrix, n_sims = 1000)
 cat("\n=== Example: 21-14, Away in possession at 2.5m ===\n")
 print(result)
