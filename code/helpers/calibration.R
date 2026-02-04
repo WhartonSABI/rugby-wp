@@ -45,17 +45,22 @@ plot_calibration <- function(calibration_results, plot_dir, title_calibration, t
   bin_summary$n <- bin_summary$actual_win[, 2]
   # Calibration curve: mean prediction vs observed outcome by bin.
   p1 <- ggplot(bin_summary, aes(x = .data$pred_mean, y = .data$actual_mean)) +
-    geom_point() +
+    geom_point(color = "#2E86AB", size = 2) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
     labs(title = title_calibration, subtitle = subtitle_calibration,
          x = "Predicted Win Probability", y = "Actual Win Rate", size = "N") +
-    xlim(0, 1) + ylim(0, 1) + theme_minimal()
+    xlim(0, 1) + ylim(0, 1) +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.background = element_rect(fill = "white", color = NA))
   # Prediction distribution split by outcome.
   p2 <- ggplot(calibration_results, aes(x = .data$predicted_win_prob, fill = factor(.data$actual_win))) +
     geom_histogram(bins = 20, alpha = 0.6, position = "identity") +
     labs(title = title_distribution, subtitle = subtitle_distribution,
          x = "Predicted Win Probability", y = "Count", fill = "Actual Win") +
-    theme_minimal()
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.background = element_rect(fill = "white", color = NA))
   # Persist plots and return for reuse.
   ggsave(file.path(plot_dir, calibration_filename), p1, width = 6, height = 5, dpi = 300)
   ggsave(file.path(plot_dir, distribution_filename), p2, width = 7, height = 5, dpi = 300)
