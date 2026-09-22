@@ -33,10 +33,21 @@ time_state_levels <- state_space$time_state_levels
 
 # Hold out 20% of games for out-of-sample calibration.
 set.seed(123)
+
+phase_data <- phase_data[order(phase_data$ID), ]
+
 unique_games <- unique(phase_data$game_id)
-holdout_games <- sample(unique_games, size = floor(0.2 * length(unique_games)))
-train_data <- phase_data[!phase_data$game_id %in% holdout_games, ]
-holdout_data <- phase_data[phase_data$game_id %in% holdout_games, ]
+n_train <- floor(0.80 * length(unique_games))
+train_games <- unique_games[1:n_train]
+
+train_data   <- phase_data[phase_data$game_id %in% train_games, ]
+holdout_data <- phase_data[!phase_data$game_id %in% train_games, ]
+
+# Trying to match with other model test set
+holdout_data <- holdout_data %>%
+  filter(first_phase == 1)
+
+# Gam
 
 state_space_train <- build_state_space(train_data)
 state_space_holdout <- build_state_space(holdout_data)
@@ -86,7 +97,7 @@ print_error_reduction(results_out_sample, "State Space Model (Markov Chain Simul
 ### EXAMPLE GAME ###
 ####################
 
-start_time_state <- time_state_levels[6]
+start_time_state <- time_state_levels[4]
 # Example: away possession near the goal with a 21-14 scoreline.
 start_state <- build_state(time_state = start_time_state, meter_line = 45, team_poss = "Home",
   score_home = 0, score_away = 0)

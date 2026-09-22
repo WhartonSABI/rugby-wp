@@ -256,7 +256,6 @@ predictors <- c(
   "Card_Diff_Team",
   "Possession",
   "adjusted_diff",
-  "total_points_both",
   "WinPct_Diff_Team"
 )
 
@@ -1281,7 +1280,6 @@ pd_list <- list(
   "Field_Position"     = partial_rf("meter_line_Team"),
   "Points_Differential"= partial_rf("Points_Diff_Team"),
   "Card_Differential"  = partial_rf("Card_Diff_Team"),
-  "total_points_both"  = partial_rf("total_points_both"),
   "WinPct_Diff_Team"  = partial_rf("WinPct_Diff_Team")
   
 )
@@ -1293,7 +1291,6 @@ pd_list_xgb <- list(
   "Field_Position"      = partial_xgb("meter_line_Team"),
   "Points_Differential" = partial_xgb("Points_Diff_Team"),
   "Card_Differential"   = partial_xgb("Card_Diff_Team"),
-  "total_points_both"   = partial_xgb("total_points_both"),
   "WinPct_Diff_Team"  = partial_rf("WinPct_Diff_Team")
 )
 

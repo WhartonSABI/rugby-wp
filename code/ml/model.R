@@ -254,8 +254,7 @@ predictors <- c(
   "Seconds_Remaining",
   "Card_Diff_Team",
   "Possession",
-  "adjusted_diff",
-  "total_points_both"
+  "adjusted_diff"
 )
 
 # Converting categorical variables to factors and making sure Win is numeric
@@ -278,23 +277,21 @@ wp_model <- phase_team %>%
 # Setting seed
 # Reproducible train/test split.
 
-set.seed(3)
+set.seed(123)
 
 # Splitting data
 # Use game-level split for model evaluation.
 
-game_ids <- wp_model %>%
-  distinct(game_id)
-
-train_games <- game_ids %>%
-  slice_sample(prop = 0.8)
+game_ids <- wp_model %>% distinct(game_id) %>% pull(game_id)
+n_train <- floor(0.80 * length(game_ids))
+train_games <- game_ids[1:n_train]
 
 train_data <- wp_model %>%
-  semi_join(train_games, by = "game_id") %>%
+  filter(game_id %in% train_games) %>%
   select(-game_id, -Round)
 
 test_data <- wp_model %>%
-  anti_join(train_games, by = "game_id") %>%
+  filter(!game_id %in% train_games) %>%
   select(-game_id, -Round)
 
 # Random Forest
@@ -513,7 +510,6 @@ cal_all <- bind_rows(
 
 plot_calibration <- function(cal_df, model_name) {
   ggplot(cal_df, aes(mean_pred, win_rate)) +
-    geom_line(linewidth = 1) +
     geom_point(size = 2) +
     geom_abline(
       slope = 1, intercept = 0,
@@ -749,8 +745,7 @@ partial_rf_seconds_by_score <- function(
 pd_list <- list(
   "Field_Position"     = partial_rf("meter_line_Team"),
   "Points_Differential"= partial_rf("Points_Diff_Team"),
-  "Card_Differential"  = partial_rf("Card_Diff_Team"),
-  "total_points_both"  = partial_rf("total_points_both")
+  "Card_Differential"  = partial_rf("Card_Diff_Team")
 )
 
 pd_seconds <- partial_rf_seconds_by_score()
@@ -884,8 +879,7 @@ partial_xgb_seconds_by_score <- function(
 pd_list_xgb <- list(
   "Field_Position"      = partial_xgb("meter_line_Team"),
   "Points_Differential" = partial_xgb("Points_Diff_Team"),
-  "Card_Differential"   = partial_xgb("Card_Diff_Team"),
-  "total_points_both"   = partial_xgb("total_points_both")
+  "Card_Differential"   = partial_xgb("Card_Diff_Team")
 )
 
 pd_seconds_xgb <- partial_xgb_seconds_by_score()
