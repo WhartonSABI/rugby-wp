@@ -93,6 +93,27 @@ invisible(plot_calibration(results_out_sample, PLOT_DIR,
   distribution_filename = "prediction_distribution_out_sample.png"))
 print_error_reduction(results_out_sample, "State Space Model (Markov Chain Simulation, Out of Sample)")
 
+#################
+### R-Squared ###
+#################
+
+calibration_r2 <- function(results, pred_col = "predicted_win_prob",
+                           actual_col = "actual_win", n_bins = 10) {
+  df <- data.frame(pred = results[[pred_col]], actual = results[[actual_col]])
+  df$bin <- cut(df$pred, breaks = seq(0, 1, length.out = n_bins + 1),
+                include.lowest = TRUE)
+  
+  bins <- aggregate(cbind(pred, actual) ~ bin, data = df, FUN = mean)
+  bins$n <- as.vector(table(df$bin)[as.character(bins$bin)])
+  
+  ss_res <- sum(bins$n * (bins$actual - bins$pred)^2)
+  ss_tot <- sum(bins$n * (bins$actual - weighted.mean(bins$actual, bins$n))^2)
+  1 - ss_res / ss_tot
+}
+
+cat(sprintf("Calibration R² (in sample):     %.3f\n", calibration_r2(results_in_sample)))
+cat(sprintf("Calibration R² (out of sample): %.3f\n", calibration_r2(results_out_sample)))
+
 ####################
 ### EXAMPLE GAME ###
 ####################
