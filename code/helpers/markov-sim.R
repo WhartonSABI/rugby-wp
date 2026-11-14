@@ -1,139 +1,42 @@
-#############
-### SETUP ###
-#############
-
-# Markov chain simulation helpers (Monte Carlo).
-
-simulate_game <- function(start_state, score_home, score_away, team_poss,
-                          transition_matrix, score_next_states, poss_change_matrix, n_sims = 1000) {
-  # Monte Carlo simulation of game outcomes from a given state.
-  results <- data.frame(home_wins = 0, away_wins = 0, ties = 0)
-  for (sim in 1:n_sims) {
-    current_state <- as.character(start_state)
-    current_score_home <- score_home
-    current_score_away <- score_away
-    current_team <- team_poss
-    # Hard cap on plays to prevent infinite loops in rare transitions.
-    max_plays <- 400
-    plays <- 0
-    while (plays < max_plays) {
-      plays <- plays + 1
-      if (!current_state %in% rownames(transition_matrix)) break
-      probs <- transition_matrix[current_state, ]
-      probs <- probs[probs > 0]
-      if (length(probs) == 0) break
-      next_event <- sample(names(probs), 1, prob = probs)
-      if (next_event == "End_of_Game") break
-      if (grepl("^Score_", next_event)) {
-        pts <- as.numeric(sub("Score_", "", next_event))
-        # Apply score change and flip possession after scoring.
-        if (current_team == "Home") {
-          current_score_home <- current_score_home + pts
-          current_team <- "Away"
-        } else {
-          current_score_away <- current_score_away + pts
-          current_team <- "Home"
-        }
-        # Sample the next state from score-specific transitions.
-        next_state_df <- score_next_states[[current_state]]
-        if (!is.null(next_state_df) && nrow(next_state_df) > 0) {
-          next_state_df$probability <- next_state_df$probability / sum(next_state_df$probability)
-          current_state <- as.character(sample(next_state_df$next_state, 1, prob = next_state_df$probability))
-        }
-      } else if (next_event == "Possession_Change") {
-        # Flip possession and sample the next field state.
-        current_team <- ifelse(current_team == "Home", "Away", "Home")
-        if (current_state %in% rownames(poss_change_matrix)) {
-          row <- poss_change_matrix[current_state, , drop = FALSE]
-          probs_row <- as.numeric(row)
-          names(probs_row) <- colnames(poss_change_matrix)
-          probs_row <- probs_row[probs_row > 0]
-          if (length(probs_row) > 0) current_state <- as.character(sample(names(probs_row), 1, prob = probs_row))
-        }
-      } else {
-        current_state <- as.character(next_event)
-      }
+# Optional trajectories from the same joint kernel used by the direct solver.
+# Never turn a numerical cutoff into a completed match.
+simulate_game_play_by_play <- function(time_state, meter_line, score_home, score_away,
+                                       team_poss, model, max_plays = 10000L) {
+  stopifnot(time_state %in% TIME_STATES, meter_line %in% FIELD_ZONES,
+            team_poss %in% c('Home', 'Away'), score_home >= 0, score_away >= 0)
+  log <- vector('list', max_plays)
+  for (i in seq_len(max_plays)) {
+    before <- build_state(time_state, meter_line, team_poss, score_home, score_away)
+    direction <- if (team_poss == 'Home') 1 else -1
+    events <- get_kernel(model, time_state, meter_line, direction * (score_home - score_away))
+    e <- events[sample.int(nrow(events), 1L, prob = events$probability), ]
+    scoring_team <- if (e$reward == 0) NA_character_ else
+      if (direction * e$reward > 0) 'Home' else 'Away'
+    if (!is.na(scoring_team) && scoring_team == 'Home') score_home <- score_home + abs(e$reward)
+    if (!is.na(scoring_team) && scoring_team == 'Away') score_away <- score_away + abs(e$reward)
+    if (!e$terminal) {
+      if (e$flip) team_poss <- if (team_poss == 'Home') 'Away' else 'Home'
+      time_state <- TIME_STATES[e$next_time]
+      meter_line <- e$next_field
     }
-    if (current_score_home > current_score_away) results$home_wins <- results$home_wins + 1
-    else if (current_score_away > current_score_home) results$away_wins <- results$away_wins + 1
-    else results$ties <- results$ties + 1
+    log[[i]] <- data.frame(play = i, state_before = before, reward = e$reward,
+      scoring_team = scoring_team, team = team_poss, home_score = score_home,
+      away_score = score_away, terminal = e$terminal, half_end = e$half_end,
+      state_after = if (e$terminal) NA_character_ else
+        build_state(time_state, meter_line, team_poss, score_home, score_away))
+    if (e$terminal) return(do.call(rbind, log[seq_len(i)]))
   }
-  results$home_win_prob <- results$home_wins / n_sims
-  results$away_win_prob <- results$away_wins / n_sims
-  results$tie_prob <- results$ties / n_sims
-  results
+  stop('Simulation failed to reach full time within max_plays; no result counted')
 }
 
-simulate_game_play_by_play <- function(start_state, score_home, score_away, team_poss,
-                                       transition_matrix, score_next_states, poss_change_matrix, max_plays = 400) {
-  # Play-by-play simulation that logs each state transition.
-  current_state <- as.character(start_state)
-  current_score_home <- score_home
-  current_score_away <- score_away
-  current_team <- team_poss
-  plays <- 0
-  log <- data.frame(play = integer(), state_before = character(), event = character(),
-    team = character(), home_score = integer(), away_score = integer(), state_after = character(), stringsAsFactors = FALSE)
-  while (plays < max_plays) {
-    plays <- plays + 1
-    if (!current_state %in% rownames(transition_matrix)) break
-    probs <- transition_matrix[current_state, ]
-    probs <- probs[probs > 0]
-    if (length(probs) == 0) break
-    next_event <- sample(names(probs), 1, prob = probs)
-    state_before <- current_state
-    if (next_event == "End_of_Game") {
-      # Terminal entry includes final state and score.
-      log <- rbind(log, data.frame(play = plays, state_before = state_before, event = "End_of_Game",
-        team = current_team, home_score = current_score_home, away_score = current_score_away, state_after = NA))
-      break
-    }
-    if (grepl("^Score_", next_event)) {
-      pts <- as.numeric(sub("Score_", "", next_event))
-      # Update score and possession, then sample post-score state.
-      if (current_team == "Home") {
-        current_score_home <- current_score_home + pts
-        current_team <- "Away"
-      } else {
-        current_score_away <- current_score_away + pts
-        current_team <- "Home"
-      }
-      next_state_df <- score_next_states[[current_state]]
-      if (!is.null(next_state_df) && nrow(next_state_df) > 0) {
-        next_state_df$probability <- next_state_df$probability / sum(next_state_df$probability)
-        current_state <- as.character(sample(next_state_df$next_state, 1, prob = next_state_df$probability))
-      }
-    } else if (next_event == "Possession_Change") {
-      # Possession changes move to a next state without scoring.
-      current_team <- ifelse(current_team == "Home", "Away", "Home")
-      if (current_state %in% rownames(poss_change_matrix)) {
-        row <- poss_change_matrix[current_state, , drop = FALSE]
-        probs_row <- as.numeric(row)
-        names(probs_row) <- colnames(poss_change_matrix)
-        probs_row <- probs_row[probs_row > 0]
-        if (length(probs_row) > 0) current_state <- as.character(sample(names(probs_row), 1, prob = probs_row))
-      }
-    } else current_state <- as.character(next_event)
-    log <- rbind(log, data.frame(play = plays, state_before = state_before, event = next_event,
-      team = current_team, home_score = current_score_home, away_score = current_score_away, state_after = current_state))
-  }
-  log
-}
-
-run_calibration_sims_sim <- function(calibration_data, transition_matrix,
-                                     score_next_states, poss_change_matrix, n_sims = 100) {
-  # Run Monte Carlo simulations for a calibration sample.
-  results <- data.frame(state = character(), actual_win = numeric(), predicted_win_prob = numeric(),
-    home_score = numeric(), away_score = numeric(), time_state = character(), stringsAsFactors = FALSE)
-  for (i in seq_len(nrow(calibration_data))) {
-    if (i %% 50 == 0) cat("Processing state", i, "of", nrow(calibration_data), "\n")
-    row <- calibration_data[i, ]
-    sim_result <- simulate_game(row$state, row$home_score, row$away_score, row$team_poss,
-      transition_matrix, score_next_states, poss_change_matrix, n_sims = n_sims)
-    pred_win_prob <- if (row$team_poss == "Home") sim_result$home_win_prob else sim_result$away_win_prob
-    results <- rbind(results, data.frame(state = row$state, actual_win = row$poss_team_won,
-      predicted_win_prob = pred_win_prob, home_score = row$home_score, away_score = row$away_score,
-      time_state = sub("_.*", "", row$state), stringsAsFactors = FALSE))
-  }
-  results
+simulate_game <- function(time_state, meter_line, score_home, score_away, team_poss,
+                          model, n_sims = 1000L, max_plays = 10000L) {
+  margins <- replicate(n_sims, {
+    x <- simulate_game_play_by_play(time_state, meter_line, score_home, score_away,
+                                   team_poss, model, max_plays)
+    tail(x$home_score - x$away_score, 1)
+  })
+  data.frame(home_win_prob = mean(margins > 0), tie_prob = mean(margins == 0),
+             away_win_prob = mean(margins < 0),
+             home_expected_result = mean((sign(margins) + 1) / 2))
 }

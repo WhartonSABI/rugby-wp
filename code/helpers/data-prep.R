@@ -22,50 +22,24 @@ prepare_phase_data <- function(file_path = "data/raw/phase_2018-19.csv",
       points = ifelse(is.na(points), 0, points)
     )
   
-  # Identify scoring events and compute cumulative total points per match.
+  # Points_Difference is already possession-relative. Use a fixed home
+  # perspective before differencing; a possession change alone is not a score.
   phase_data <- phase_data %>%
+    arrange(ID) %>%
     group_by(Round, Home, Away) %>%
     mutate(
-      prev_diff = lag(Points_Difference, default = first(Points_Difference)),
-      scoring_event = abs(Points_Difference) != abs(prev_diff) & row_number() > 1,
-      points_change = if_else(scoring_event, abs(lag(points)), 0),
-      total_points_both = cumsum(points_change)
+      home_margin = if_else(Team_In_Poss == "Home", Points_Difference, -Points_Difference),
+      home_margin_change = home_margin - lag(home_margin, default = 0),
+      points_change = abs(home_margin_change),
+      scoring_event = points_change > 0,
+      total_points_both = cumsum(points_change),
+      home_score = (total_points_both + home_margin) / 2,
+      away_score = (total_points_both - home_margin) / 2
     ) %>%
     ungroup()
-  
-  # Build final score table to derive per-team win outcomes.
-  last_play <- phase_data %>%
-    group_by(Round, Home, Away) %>%
-    filter(ID == max(ID)) %>%
-    ungroup() %>%
-    mutate(
-      last_play_points = str_extract(Outcome, "[-+]?\\d+") %>% as.numeric(),
-      last_play_points = ifelse(is.na(last_play_points), 0, last_play_points),
-      Score_Change = last_play_points,
-      Final_Points_Difference = Points_Difference + Score_Change,
-      Final_Points_Diff_Home = if_else(Team_In_Poss == "Home",
-                                       Final_Points_Difference,
-                                       -Final_Points_Difference)
-    ) %>%
-    dplyr::select(Round, Home, Away, Final_Points_Diff_Home) %>%
-    distinct()
-  
-  # Expand home/away rows into team rows with win labels.
-  last_play <- last_play %>%
-    pivot_longer(cols = c(Home, Away), names_to = "Side", values_to = "Team") %>%
-    mutate(
-      Win = case_when(
-        Side == "Home" & Final_Points_Diff_Home > 0  ~ 1,
-        Side == "Home" & Final_Points_Diff_Home == 0 ~ 0.5,
-        Side == "Home" & Final_Points_Diff_Home < 0  ~ 0,
-        Side == "Away" & Final_Points_Diff_Home < 0  ~ 1,
-        Side == "Away" & Final_Points_Diff_Home == 0 ~ 0.5,
-        Side == "Away" & Final_Points_Diff_Home > 0  ~ 0
-      ),
-      Round = as.numeric(Round)
-    ) %>%
-    arrange(Team, Round)
-  
+  stopifnot(all(phase_data$points_change %in% c(0, 3, 5, 7)),
+            all(phase_data$home_score >= 0), all(phase_data$away_score >= 0))
+
   # Compute rolling win percentage before each match (Elo-style features below).
   matches <- phase_data %>%
     group_by(Round, Home, Away) %>%
@@ -96,18 +70,12 @@ prepare_phase_data <- function(file_path = "data/raw/phase_2018-19.csv",
     away <- matches$Away[i]
     matches$Home_Elo_Before[i] <- team_current_elo[home]
     matches$Away_Elo_Before[i] <- team_current_elo[away]
-    home_won <- matches$Final_Points_Diff_Home[i] > 0
-    if (home_won) {
-      expected <- 1 / (1 + 10^((team_current_elo[away] - team_current_elo[home]) / 400))
-      elo_change <- 32 * (1 - expected)
-      team_current_elo[home] <- team_current_elo[home] + elo_change
-      team_current_elo[away] <- team_current_elo[away] - elo_change
-    } else {
-      expected <- 1 / (1 + 10^((team_current_elo[home] - team_current_elo[away]) / 400))
-      elo_change <- 32 * (1 - expected)
-      team_current_elo[away] <- team_current_elo[away] + elo_change
-      team_current_elo[home] <- team_current_elo[home] - elo_change
-    }
+    home_result <- if (matches$Final_Points_Diff_Home[i] == 0) 0.5 else
+      as.numeric(matches$Final_Points_Diff_Home[i] > 0)
+    expected <- 1 / (1 + 10^((team_current_elo[away] - team_current_elo[home]) / 400))
+    elo_change <- 32 * (home_result - expected)
+    team_current_elo[home] <- team_current_elo[home] + elo_change
+    team_current_elo[away] <- team_current_elo[away] - elo_change
   }
   
   # Attach win percentage and Elo features to each team/round.

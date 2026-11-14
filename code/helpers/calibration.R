@@ -1,103 +1,53 @@
-#############
-### SETUP ###
-#############
-
-# Shared calibration helpers: prepare data, plot calibration curves, print error reduction.
-
-library(ggplot2)
-library(rlang)
-
-########################
-### CALIBRATION DATA ###
-########################
-
-prepare_calibration_data <- function(phase_data, n_samples = 1000) {
-  # Remove terminal states and sample a reproducible subset of phases.
-  phase_data <- phase_data[phase_data$state_result != "End_of_Game", ]
-  set.seed(123)
-  sample_indices <- sample(seq_len(nrow(phase_data)), min(n_samples, nrow(phase_data)))
-  sampled_states <- phase_data[sample_indices, ]
-  # Reconstruct home/away scores and possession from phase-level features.
-  sampled_states$home_score <- ifelse(sampled_states$Team_In_Poss == "Home",
-    (sampled_states$total_points_both + sampled_states$Points_Difference) / 2,
-    (sampled_states$total_points_both - sampled_states$Points_Difference) / 2)
-  sampled_states$away_score <- sampled_states$total_points_both - sampled_states$home_score
-  sampled_states$team_poss <- ifelse(sampled_states$Team_In_Poss == "Home", "Home", "Away")
-  sampled_states$poss_team_won <- sampled_states$Win
-  sampled_states
+# All reported errors target E[1(win) + 0.5*1(draw)], with common observations.
+# Bootstrap intervals below resample held-out games, conditional on fitted models.
+prepare_calibration_data <- function(phase_data, n_samples = Inf) {
+  d <- phase_data
+  if (is.finite(n_samples) && nrow(d) > n_samples) {
+    set.seed(123); d <- d[sample.int(nrow(d), n_samples), ]
+  }
+  d$team_poss <- d$Team_In_Poss
+  d$poss_team_won <- d$Win
+  d
 }
 
-#############
-### PLOTS ###
-#############
-
-plot_calibration <- function(calibration_results, plot_dir, title_calibration, title_distribution,
-                             subtitle_calibration, subtitle_distribution,
-                             calibration_filename = "calibration_curve.png",
-                             distribution_filename = "prediction_distribution.png") {
-  # Bin predictions into deciles and summarize average predicted vs actual.
-  calibration_results$pred_bin_num <- cut(calibration_results$predicted_win_prob,
-    breaks = seq(0, 1, 0.1), include.lowest = TRUE)
-  bin_summary <- aggregate(cbind(actual_win, predicted_win_prob) ~ pred_bin_num,
-    data = calibration_results, FUN = function(x) c(mean = mean(x), n = length(x)))
-  bin_summary$pred_mean <- bin_summary$predicted_win_prob[, 1]
-  bin_summary$actual_mean <- bin_summary$actual_win[, 1]
-  bin_summary$n <- bin_summary$actual_win[, 2]
-  # Calibration curve: mean prediction vs observed outcome by bin.
-  p1 <- ggplot(bin_summary, aes(x = .data$pred_mean, y = .data$actual_mean)) +
-    geom_point(color = "#2E86AB", size = 2) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
-    labs(title = title_calibration, subtitle = subtitle_calibration,
-         x = "Predicted Win Probability", y = "Actual Win Rate", size = "N") +
-    xlim(0, 1) + ylim(0, 1) +
-    theme_minimal() +
-    theme(panel.background = element_rect(fill = "white", color = NA),
-          plot.background = element_rect(fill = "white", color = NA))
-  # Prediction distribution split by outcome.
-  p2 <- ggplot(calibration_results, aes(x = .data$predicted_win_prob, fill = factor(.data$actual_win))) +
-    geom_histogram(bins = 20, alpha = 0.6, position = "identity") +
-    labs(title = title_distribution, subtitle = subtitle_distribution,
-         x = "Predicted Win Probability", y = "Count", fill = "Actual Win") +
-    theme_minimal() +
-    theme(panel.background = element_rect(fill = "white", color = NA),
-          plot.background = element_rect(fill = "white", color = NA))
-  # Persist plots and return for reuse.
-  ggsave(file.path(plot_dir, calibration_filename), p1, width = 6, height = 5, dpi = 300)
-  ggsave(file.path(plot_dir, distribution_filename), p2, width = 7, height = 5, dpi = 300)
-  invisible(list(calibration = p1, distribution = p2))
+performance_summary <- function(predictions, n_boot = 2000L, seed = 123) {
+  models <- setdiff(names(predictions), c('ID','game_id','side','actual'))
+  stopifnot(!anyNA(predictions), all(as.matrix(predictions[models]) >= 0),
+            all(as.matrix(predictions[models]) <= 1))
+  errors <- sapply(models,function(m) (predictions[[m]] - predictions$actual)^2)
+  sums <- rowsum(errors, predictions$game_id)
+  counts <- as.numeric(table(factor(predictions$game_id,levels=rownames(sums))))
+  set.seed(seed)
+  draws <- replicate(n_boot, sample.int(nrow(sums), nrow(sums), replace=TRUE))
+  boot <- apply(draws,2,function(i) colSums(sums[i,,drop=FALSE])/sum(counts[i]))
+  ci <- t(apply(boot,1,quantile,c(.025,.975)))
+  mse <- colMeans(errors)
+  result <- data.frame(model=models,mse=mse,rmse=sqrt(mse),lower=ci[,1],upper=ci[,2],row.names=NULL)
+  baseline <- mse[match('Naive',models)]
+  result$error_reduction <- 1-result$mse/baseline
+  differences <- t(apply(sweep(boot,2,boot[match('Markov',models),],'-'),1,quantile,c(.025,.975)))
+  result$mse_minus_markov <- mse - mse[match('Markov',models)]
+  result$difference_lower <- differences[,1]; result$difference_upper <- differences[,2]
+  result
 }
 
-###############
-### METRICS ###
-###############
-
-rmse <- function(y, p) sqrt(mean((y - p)^2))
-mse <- function(y, p) mean((y - p)^2)
-
-print_error_reduction <- function(calibration_results, model_name) {
-  # Compare model errors to naive and prevalence baselines.
-  y_actual <- calibration_results$actual_win
-  y_pred <- calibration_results$predicted_win_prob
-  state_space_rmse <- rmse(y_actual, y_pred)
-  state_space_mse <- mse(y_actual, y_pred)
-  naive_rmse <- sqrt(mean((y_actual - 0.5)^2))
-  prop_rmse <- sqrt(mean((y_actual - mean(y_actual))^2))
-  naive_mse <- mean((y_actual - 0.5)^2)
-  prop_mse <- mean((y_actual - mean(y_actual))^2)
-  error_reduction <- data.frame(
-    Model = model_name,
-    RMSE = state_space_rmse, MSE = state_space_mse,
-    RMSE_vs_Naive = paste0(round(100 * (naive_rmse - state_space_rmse) / naive_rmse, 2), "%"),
-    MSE_vs_Naive = paste0(round(100 * (naive_mse - state_space_mse) / naive_mse, 2), "%"),
-    RMSE_vs_Prop = paste0(round(100 * (prop_rmse - state_space_rmse) / prop_rmse, 2), "%"),
-    MSE_vs_Prop = paste0(round(100 * (prop_mse - state_space_mse) / prop_mse, 2), "%"))
-  cat("\n=== Error Reduction vs Baselines ===\n")
-  print(error_reduction)
-  cat("\n=== Baseline Performance ===\n")
-  cat("Naive (0.5) RMSE:", naive_rmse, "\n")
-  cat("Naive (0.5) MSE:", naive_mse, "\n")
-  cat("Proportion RMSE:", prop_rmse, "\n")
-  cat("Proportion MSE:", prop_mse, "\n")
-  invisible(calibration_results)
+calibration_summary <- function(predictions, model='Markov', n_boot=2000L, seed=124) {
+  p <- predictions[[model]]; y <- predictions$actual
+  stopifnot(!anyNA(p), all(p >= -1e-12 & p <= 1+1e-12))
+  p <- pmin(pmax(p,0),1)
+  bins <- cut(p,seq(0,1,.1),include.lowest=TRUE,labels=FALSE)
+  games <- unique(predictions$game_id)
+  set.seed(seed)
+  draws <- replicate(n_boot,sample(games,length(games),replace=TRUE))
+  do.call(rbind,lapply(sort(unique(bins)),function(b) {
+    take <- bins==b
+    totals <- rowsum(cbind(y=y[take],n=1), predictions$game_id[take])
+    rates <- apply(draws,2,function(g) {
+      z <- totals[match(g,rownames(totals)),,drop=FALSE]
+      sum(z[,1],na.rm=TRUE)/sum(z[,2],na.rm=TRUE)
+    })
+    limits <- quantile(rates,c(.025,.975),na.rm=TRUE)
+    data.frame(bin=b,predicted=mean(p[take]),observed=mean(y[take]),n=sum(take),
+               games=length(unique(predictions$game_id[take])),lower=limits[1],upper=limits[2])
+  }))
 }
-

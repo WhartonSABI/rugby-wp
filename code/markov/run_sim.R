@@ -1,365 +1,91 @@
-#############
-### SETUP ###
-#############
-
-# Markov Chain Simulation — Win probability via Monte Carlo simulation.
-# Run from project root: Rscript code/markov/run_sim.R
-if (!file.exists("code/helpers/data-prep.R")) {
-  stop("Run from project root: setwd(...) or Rscript code/markov/run_sim.R")
-}
-
-# Load shared helpers for data prep, state space, and calibration.
-source("code/helpers/data-prep.R")
-source("code/helpers/state-space.R")
-source("code/helpers/calibration.R")
-source("code/helpers/markov-sim.R")
-
-# Build phase-level data and initialize state space.
-transition_path <- "data/results/transition_probs.rds"
-if (file.exists(transition_path)) {
-  state_space <- readRDS(transition_path)
-} else {
-  phase_data <- prepare_phase_data(save_processed = TRUE)
-  state_space <- build_state_space(phase_data, save_transition = TRUE)
-}
-phase_data <- state_space$phase_data
-phase_data <- state_space$phase_data
-transition_matrix <- state_space$transition_matrix
-transition_df <- state_space$transition_df
-scoring_probs <- state_space$scoring_probs
-score_next_states <- state_space$score_next_states
-poss_change_matrix <- state_space$poss_change_matrix
-time_state_levels <- state_space$time_state_levels
-
-# Hold out 20% of games for out-of-sample calibration.
+# Corrected analysis. Run from the repository root:
+# Rscript code/markov/run_sim.R [output-directory]
+# The historical entry-point name is retained; predictions now use absorption
+# equations. Simulation supplies only illustrative trajectories and checks.
+suppressPackageStartupMessages({
+  source('code/helpers/data-prep.R'); source('code/helpers/state-space.R')
+  source('code/helpers/absorption.R'); source('code/helpers/markov-sim.R')
+  source('code/helpers/calibration.R'); source('code/helpers/comparators.R')
+  library(ggplot2)
+})
+args <- commandArgs(trailingOnly=TRUE)
+out <- if(length(args)) args[1] else 'output/markov-revision-20261113'
+dir.create(out,recursive=TRUE,showWarnings=FALSE)
 set.seed(123)
-
-phase_data <- phase_data[order(phase_data$ID), ]
-
-unique_games <- unique(phase_data$game_id)
-n_train <- floor(0.80 * length(unique_games))
-train_games <- unique_games[1:n_train]
-
-train_data   <- phase_data[phase_data$game_id %in% train_games, ]
-holdout_data <- phase_data[!phase_data$game_id %in% train_games, ]
-
-# Trying to match with other model test set
-holdout_data <- holdout_data %>%
-  filter(first_phase == 1)
-
-# Gam
-
-state_space_train <- build_state_space(train_data)
-state_space_holdout <- build_state_space(holdout_data)
-
-#############
-### PLOTS ###
-#############
-
-PLOT_DIR <- "plots/markov/sim"
-dir.create(PLOT_DIR, recursive = TRUE, showWarnings = FALSE)
-###################
-### CALIBRATION ###
-###################
-
-calibration_in_sample <- prepare_calibration_data(phase_data, n_samples = 1000)
-# In-sample simulation using full transition estimates.
-results_in_sample <- run_calibration_sims_sim(calibration_in_sample, transition_matrix,
-  score_next_states, poss_change_matrix, n_sims = 100)
-
-invisible(plot_calibration(results_in_sample, PLOT_DIR,
-  "Markov Chain Simulation — Calibration Curve (In Sample)",
-  "Markov Chain Simulation — Distribution of Predictions (In Sample)",
-  "Using Monte Carlo simulation. Perfect calibration = points on diagonal line",
-  "Using Monte Carlo simulation",
-  calibration_filename = "calibration_in_sample.png",
-  distribution_filename = "prediction_distribution_in_sample.png"))
-print_error_reduction(results_in_sample, "State Space Model (Markov Chain Simulation, In Sample)")
-
-# Out-of-sample evaluation with transitions trained on training games only.
-calibration_out_sample <- prepare_calibration_data(state_space_holdout$phase_data, n_samples = 1000)
-results_out_sample <- run_calibration_sims_sim(calibration_out_sample,
-  state_space_train$transition_matrix,
-  state_space_train$score_next_states,
-  state_space_train$poss_change_matrix,
-  n_sims = 100)
-
-invisible(plot_calibration(results_out_sample, PLOT_DIR,
-  "Markov Chain Simulation — Calibration Curve (Out of Sample)",
-  "Markov Chain Simulation — Distribution of Predictions (Out of Sample)",
-  "Holdout matches, transitions fit on train set",
-  "Holdout matches, transitions fit on train set",
-  calibration_filename = "calibration_out_sample.png",
-  distribution_filename = "prediction_distribution_out_sample.png"))
-print_error_reduction(results_out_sample, "State Space Model (Markov Chain Simulation, Out of Sample)")
-
-#################
-### R-Squared ###
-#################
-
-calibration_r2 <- function(results, pred_col = "predicted_win_prob",
-                           actual_col = "actual_win", n_bins = 10) {
-  df <- data.frame(pred = results[[pred_col]], actual = results[[actual_col]])
-  df$bin <- cut(df$pred, breaks = seq(0, 1, length.out = n_bins + 1),
-                include.lowest = TRUE)
-  
-  bins <- aggregate(cbind(pred, actual) ~ bin, data = df, FUN = mean)
-  bins$n <- as.vector(table(df$bin)[as.character(bins$bin)])
-  
-  ss_res <- sum(bins$n * (bins$actual - bins$pred)^2)
-  ss_tot <- sum(bins$n * (bins$actual - weighted.mean(bins$actual, bins$n))^2)
-  1 - ss_res / ss_tot
+d <- prepare_transition_data(prepare_phase_data())
+games <- unique(d$game_id); training <- head(games,floor(.8*length(games)))
+train <- d[d$game_id %in% training,]; test <- d[!d$game_id %in% training,]
+model <- build_state_space(train)
+write.csv(data.frame(game_id=games,split=ifelse(games %in% training,'train','test')),
+          file.path(out,'split.csv'),row.names=FALSE)
+write.csv(model$support,file.path(out,'state_support.csv'),row.names=FALSE)
+write.csv(d[d$reward!=0 & d$reward!=d$points,c('ID','game_id','Outcome','reward')],
+          file.path(out,'source_label_disagreements.csv'),row.names=FALSE)
+train_rows <- team_rows(train[train$first_phase==1,])
+test_rows <- team_rows(test[test$first_phase==1,])
+queries <- rbind(train[train$first_phase==1,], test[test$first_phase==1,])
+# Choose a numerical grid based on unresolved probability mass, never labels.
+for (bound in c(100L,150L,200L,300L)) {
+  cat('Absorption grid +/-',bound,'\n')
+  chain <- compile_absorbing_chain(model,bound)
+  index <- chain$index(as.integer(queries$time_state),queries$meter_line,queries$home_margin,
+                       ifelse(queries$Team_In_Poss=='Home',1L,-1L))
+  max_unresolved <- max(chain$probabilities[index,'unresolved'])
+  cat('Maximum unresolved mass:',max_unresolved,'\n')
+  if (max_unresolved<1e-8) break
 }
-
-cat(sprintf("Calibration R² (in sample):     %.3f\n", calibration_r2(results_in_sample)))
-cat(sprintf("Calibration R² (out of sample): %.3f\n", calibration_r2(results_out_sample)))
-
-####################
-### EXAMPLE GAME ###
-####################
-
-start_time_state <- time_state_levels[1]
-# Example: away possession near the goal with a 21-14 scoreline.
-start_state <- build_state(time_state = start_time_state, meter_line = 45, team_poss = "Home",
-  score_home = 0, score_away = 0)
-result <- simulate_game(start_state, 0, 0, "Home", transition_matrix,
-  score_next_states, poss_change_matrix, n_sims = 1000)
-cat("\n=== Example: 21-14, Away in possession at 2.5m ===\n")
-print(result)
-
-# Play-by-play example from kickoff state.
-pbp_start_state <- build_state(time_state = start_time_state, meter_line = 69, team_poss = "Home",
-  score_home = 0, score_away = 0)
-pbp <- simulate_game_play_by_play(
-  start_state = pbp_start_state,
-  score_home = 0,
-  score_away = 0,
-  team_poss = "Home",
-  transition_matrix = transition_matrix,
-  score_next_states = score_next_states,
-  poss_change_matrix = poss_change_matrix
-)
-
-
-# Simulating next scoring event
-
-get_outcome <- function(meter_line, time_state, team_poss = "Home",
-                        transition_matrix, score_next_states, poss_change_matrix) {
-  start_state <- build_state(time_state = time_state, meter_line = meter_line,
-                             team_poss = team_poss, score_home = 0, score_away = 0)
-  pbp <- simulate_game_play_by_play(
-    start_state = start_state,
-    score_home = 0, score_away = 0, team_poss = team_poss,
-    transition_matrix = transition_matrix,
-    score_next_states = score_next_states,
-    poss_change_matrix = poss_change_matrix
-  )
-  
-  idx <- which(pbp$event %in% c("Score_3", "Score_5", "Score_7", "End_of_Game"))[1]
-  if (is.na(idx)) return(NA_character_)
-  if (pbp$event[idx] == "End_of_Game") return("End_of_Game")
-  
-  # Determine who scored by comparing score columns to the prior row
-  # (or to 0/0 if it's the very first play)
-  prev_home <- if (idx == 1) 0 else pbp$home_score[idx - 1]
-  prev_away <- if (idx == 1) 0 else pbp$away_score[idx - 1]
-  
-  scoring_team <- if (pbp$home_score[idx] > prev_home) "Home" else "Away"
-  points <- case_when(
-    pbp$event[idx] == "Score_7" ~ "7",
-    pbp$event[idx] == "Score_5" ~ "5",
-    pbp$event[idx] == "Score_3" ~ "3"
-  )
-  
-  if (scoring_team == team_poss) {
-    paste0("Starting_Team_Score_", points)
-  } else {
-    paste0("Opponent_Score_", points)
-  }
+if(max_unresolved>=1e-8) stop('Grid did not meet numerical tolerance')
+p <- predict_absorption(chain,test$time_state[test$first_phase==1],test$meter_line[test$first_phase==1],
+                        test$home_margin[test$first_phase==1],test$Team_In_Poss[test$first_phase==1])
+cat('Fitting comparators using training games and an inner validation split\n')
+comparison <- fit_comparators(train_rows,test_rows)
+pred <- comparison$predictions
+pred$Markov <- c(p$expected_result_home,p$away_win+.5*p$draw)
+write.csv(pred,file.path(out,'predictions.csv'),row.names=FALSE)
+write.csv(cbind(test[test$first_phase==1,c('ID','game_id')],p),file.path(out,'markov_probabilities.csv'),row.names=FALSE)
+metrics <- performance_summary(pred)
+write.csv(metrics,file.path(out,'performance.csv'),row.names=FALSE); print(metrics)
+cal <- calibration_summary(pred)
+write.csv(cal,file.path(out,'calibration.csv'),row.names=FALSE)
+ggsave(file.path(out,'calibration.png'),
+  ggplot(cal,aes(predicted,observed))+geom_abline(slope=1,intercept=0,linetype='dashed')+
+  geom_errorbar(aes(ymin=lower,ymax=upper),width=.015)+geom_point(aes(size=n))+
+  coord_equal(xlim=c(0,1),ylim=c(0,1))+theme_minimal(base_size=13)+
+  labs(x='Predicted win probability + half draw probability',y='Observed result (win = 1, draw = 0.5)',
+       size='Team-state rows',subtitle='Held-out games; 95% match-bootstrap intervals'),width=7,height=6,dpi=180)
+for(horizon in c('half','match')) {
+  ep <- next_score_probabilities(model,horizon=horizon)
+  write.csv(ep,file.path(out,paste0('next_score_',horizon,'.csv')),row.names=FALSE)
+  # Display each time bucket separately; these are pooled phase states, not lineouts.
+  display <- ep[ep$poss==1,];display$time_state <- factor(TIME_STATES[display$time],levels=TIME_STATES)
+  ggsave(file.path(out,paste0('expected_points_',horizon,'.png')),
+    ggplot(display,aes(field,ep_home))+geom_hline(yintercept=0,linetype='dashed')+
+    geom_line()+geom_point()+facet_wrap(~time_state,ncol=3)+theme_minimal(base_size=12)+
+    labs(x='Distance from opposition try line (m)',y='Expected next-score points',
+         subtitle=paste('Tied score, home possession; horizon:',horizon)),width=10,height=6,dpi=180)
 }
-
-n_sims <- 1000
-meter_lines <- c(2.5, 13.5, 31, 45, 55, 69, 86.5, 97.5)
-
-outcome_probs <- map_dfr(meter_lines, function(ml) {
-  outcomes <- map_chr(seq_len(n_sims), ~ get_outcome(
-    meter_line = ml, time_state = "1h_start", team_poss = "Home",
-    transition_matrix = transition_matrix,
-    score_next_states = score_next_states,
-    poss_change_matrix = poss_change_matrix
-  ))
-  tibble(meter_line = ml, outcome = outcomes)
-}) %>%
-  filter(!is.na(outcome)) %>%
-  count(meter_line, outcome) %>%
-  group_by(meter_line) %>%
-  mutate(probability = n / sum(n)) %>%
-  ungroup()
-
-outcome_colors <- c(
-  "Starting_Team_Score_3" = "#9ecae1",  # light blue
-  "Starting_Team_Score_5" = "#4292c6",  # medium blue
-  "Starting_Team_Score_7" = "#08519c",  # dark blue
-  "Opponent_Score_3"      = "#fcae91",  # light red
-  "Opponent_Score_5"      = "#fb6a4a",  # medium red
-  "Opponent_Score_7"      = "#a50f15",  # dark red
-  "End_of_Game"           = "gray50"
-)
-
-next_score_plot <- ggplot(outcome_probs, aes(x = meter_line, y = probability, color = outcome)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 1.5) +
-  scale_color_manual(values = outcome_colors) +
-  labs(title = "Probability of Game Outcome by Starting Field Position",
-       x = "Meter Line", y = "Probability", color = "Outcome") +
-  theme_minimal()
-
-ggsave(
-  filename = file.path(PLOT_DIR, "next_score_plot.png"),
-  plot = next_score_plot,
-  width = 8, height = 5, dpi = 300
-)
-
-# Smoothed
-
-next_score_plot_smooth <-ggplot(outcome_probs, aes(x = meter_line, y = probability, color = outcome)) +
-  geom_smooth(se = FALSE, method = "loess", linewidth = 1) +
-  scale_color_manual(values = outcome_colors) +
-  labs(title = "Probability of Game Outcome by Starting Field Position (Smoothed)",
-       x = "Meter Line", y = "Probability", color = "Outcome") +
-  theme_minimal()
-
-ggsave(
-  filename = file.path(PLOT_DIR, "next_score_plot_smooth.png"),
-  plot = next_score_plot_smooth,
-  width = 8, height = 5, dpi = 300
-)
-
-# Expected Points
-
-expected_points <- outcome_probs %>%
-  mutate(
-    points = case_when(
-      outcome == "Starting_Team_Score_7" ~ 7,
-      outcome == "Starting_Team_Score_3" ~ 3,
-      outcome == "Opponent_Score_7"      ~ -7,
-      outcome == "Opponent_Score_3"      ~ -3,
-      outcome == "End_of_Game"           ~ 0,
-      TRUE ~ 0
-    ),
-    weighted_points = probability * points
-  ) %>%
-  group_by(meter_line) %>%
-  summarise(expected_points = sum(weighted_points), .groups = "drop")
-
-expected_points_plot <- ggplot(expected_points, aes(x = meter_line, y = expected_points)) +
-  geom_point(size = 2) +
-  geom_smooth(se = FALSE, method = "loess", linewidth = 1, color = "steelblue") +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-  labs(title = "Expected Points by Starting Field Position (With Possession)",
-       x = "Meter Line", y = "Expected Points") +
-  theme_minimal()
-
-ggsave(
-  filename = file.path(PLOT_DIR, "expected_points_plot.png"),
-  plot = expected_points_plot,
-  width = 8, height = 5, dpi = 300
-)
-
-
-# Simulating final scores from a given state
-
-# Middle of First Half
-
-time_state_initial <- time_state_levels[2]
-score_home <- 7
-score_away <- 10
-poss       <- "Home"
-
-start_state <- build_state(time_state = time_state_initial,
-                           meter_line = 45, team_poss = poss,
-                           score_home = score_home, score_away = score_away)
-
-# Getting Final Score of Game
-
-sim_final <- function() {
-  pbp <- simulate_game_play_by_play(
-    start_state        = start_state,
-    score_home         = score_home,
-    score_away         = score_away,
-    team_poss          = poss,
-    transition_matrix  = transition_matrix,
-    score_next_states  = score_next_states,
-    poss_change_matrix = poss_change_matrix
-  )
-  last <- pbp[nrow(pbp), ]
-  c(home = last$home_score, away = last$away_score, plays = nrow(pbp))
+for(time in c('1h_middle','2h_middle')) {
+  margins <- final_margin_distribution(chain,time,45,-3,'Home')
+  write.csv(margins,file.path(out,paste0('margin_',time,'.csv')),row.names=FALSE)
+  ggsave(file.path(out,paste0('margin_',time,'.png')),
+    ggplot(margins,aes(margin,probability))+geom_col()+geom_vline(xintercept=0,linetype='dashed')+
+    coord_cartesian(xlim=c(-60,60))+theme_minimal(base_size=13)+
+    labs(x='Final home-minus-away margin',y='Probability',
+         subtitle=paste(time,'; home down 3, home possession at 45 m')),width=7,height=4,dpi=180)
 }
-
-n_sims <- 1000
-finals <- as.data.frame(t(replicate(n_sims, sim_final()))) |>
-  mutate(margin = home - away,
-         result = case_when(margin > 0 ~ "Home win",
-                            margin < 0 ~ "Away win",
-                            TRUE       ~ "Tie"))
-
-final_margin_plot_first_half <- ggplot(finals, aes(margin, fill = margin > 0)) +
-  geom_histogram(binwidth = 1, color = "white", show.legend = FALSE) +
-  geom_vline(xintercept = 0, linetype = "dashed") +
-  scale_fill_manual(values = c("TRUE" = "#2c7fb8", "FALSE" = "#d95f0e")) +
-  labs(title = "Final margin (Home - Away), Home down 3 in Middle of First Half",
-       x = "Final margin", y = "Simulations")
-
-ggsave(
-  filename = file.path(PLOT_DIR, "final_margin_plot_first_half.png"),
-  plot = final_margin_plot_first_half,
-  width = 8, height = 5, dpi = 300
-)
-
-# Middle of Second Half
-
-time_state_initial <- time_state_levels[5]
-score_home <- 7
-score_away <- 10
-poss       <- "Home"
-
-start_state <- build_state(time_state = time_state_initial,
-                           meter_line = 45, team_poss = poss,
-                           score_home = score_home, score_away = score_away)
-
-# Getting Final Score of Game
-
-sim_final <- function() {
-  pbp <- simulate_game_play_by_play(
-    start_state        = start_state,
-    score_home         = score_home,
-    score_away         = score_away,
-    team_poss          = poss,
-    transition_matrix  = transition_matrix,
-    score_next_states  = score_next_states,
-    poss_change_matrix = poss_change_matrix
-  )
-  last <- pbp[nrow(pbp), ]
-  c(home = last$home_score, away = last$away_score, plays = nrow(pbp))
-}
-
-n_sims <- 1000
-finals <- as.data.frame(t(replicate(n_sims, sim_final()))) |>
-  mutate(margin = home - away,
-         result = case_when(margin > 0 ~ "Home win",
-                            margin < 0 ~ "Away win",
-                            TRUE       ~ "Tie"))
-
-final_margin_plot_second_half <- ggplot(finals, aes(margin, fill = margin > 0)) +
-  geom_histogram(binwidth = 1, color = "white", show.legend = FALSE) +
-  geom_vline(xintercept = 0, linetype = "dashed") +
-  scale_fill_manual(values = c("TRUE" = "#2c7fb8", "FALSE" = "#d95f0e")) +
-  labs(title = "Final margin (Home - Away), Home down 3 in Middle of First Half",
-       x = "Final margin", y = "Simulations")
-
-ggsave(
-  filename = file.path(PLOT_DIR, "final_margin_plot_second_half.png"),
-  plot = final_margin_plot_second_half,
-  width = 8, height = 5, dpi = 300
-)
-
+set.seed(123)
+pbp <- simulate_game_play_by_play('1h_start',69,0,0,'Home',model)
+write.csv(pbp,file.path(out,'example_trajectory.csv'),row.names=FALSE)
+write.csv(predict_absorption(chain,'2h_middle',45,7,'Home'),
+          file.path(out,'example_21_14.csv'),row.names=FALSE)
+jsonlite::write_json(list(training_games=length(training),test_games=length(games)-length(training),
+  training_phases=nrow(train),test_phases=nrow(test),test_first_phases=sum(test$first_phase==1),
+  evaluation_team_rows=nrow(test_rows),margin_limit=bound,max_unresolved=max_unresolved,
+  linear_system_residual=chain$residual,xgb_rounds=comparison$xgb_rounds,
+  source_md5=unname(tools::md5sum('data/raw/phase_2018-19.csv')),
+  heldout_bootstrap='2000 resamples of games; fitted models held fixed',
+  kernel='joint signed score, possession switch, next field/time, terminal; empirical rows; unseen-row training backoff'),
+  file.path(out,'diagnostics.json'),pretty=TRUE,auto_unbox=TRUE)
+saveRDS(model,file.path(out,'transition_model_v2.rds'))
+capture.output(sessionInfo(),file=file.path(out,'session-info.txt'))
+cat('Saved corrected analysis to',out,'\n')
